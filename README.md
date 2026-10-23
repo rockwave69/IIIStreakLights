@@ -1,6 +1,8 @@
 III Headlight Streaks
 ====================
 
+![Demo](screens/screen%20(1).png)
+
 The plugin is built with Plugin-SDK. It keeps the game's normal lighting enabled and draws an additional screen-space effect.
 
 How it works
