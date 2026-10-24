@@ -26,13 +26,12 @@ extern "C"
 // GTA San Andreas 1.0 US / Plugin-SDK.
 // Adds re3-inspired streaks while retaining the game's normal light system.
 // Screen-space history replaces the STREAK_ON flag unavailable through SA's corona API.
-// This plugin never dereferences vehicle headlight/taillight material pointers: it
-// uses guarded model dummy positions and native corona/sprite APIs instead.
 
 namespace
 {
     constexpr float HEADLIGHT_CORE_FAR_CLIP = 45.0f;
     constexpr float REVERSE_LIGHT_CORE_SIZE_MULTIPLIER = 0.70f;
+    constexpr int QUADBIKE_MODEL_ID = 471; // GTA San Andreas Quadbike model ID.
     constexpr float REVERSE_LIGHT_FAR_CLIP = 28.0f;
     constexpr float HEADLIGHT_NEAR_CLIP = 0.5f;
     constexpr float HEADLIGHT_FADE_SPEED = 50.0f;
@@ -86,6 +85,7 @@ namespace
 
     float fBikeReverseStreakSizeMult = 0.55f;
     float fBikeReverseCoreSizeMult = 0.60f;
+    float fBikeReverseBrightnessMult = 0.85f;
 
     float fSideAngleExponent = 4.0f;
     float fFrontAngleFadeStart = -0.88f;
@@ -108,79 +108,12 @@ namespace
 
     bool bDebugMenuRegistered = false;
 
-    // A fault in an add-on vehicle model must not take down the game. Model
-    // indices that trigger a recoverable access violation are quarantined for
-    // the rest of the session; if the bad pointer cannot be attributed to a
-    // model, the custom layer is disabled globally.
-    constexpr int MAX_QUARANTINED_MODEL_INDICES = 512;
-    int aQuarantinedModelIndices[MAX_QUARANTINED_MODEL_INDICES] = {};
-    int nQuarantinedModelIndices = 0;
-    bool bRuntimeFaultDetected = false;
-
-    bool IsFiniteVector(const CVector& value)
-    {
-        return std::isfinite(value.x) && std::isfinite(value.y) &&
-               std::isfinite(value.z);
-    }
-
-    bool IsSaneLocalLightPosition(const CVector& value)
-    {
-        // Vehicle dummy offsets should be small, local-space coordinates.
-        // Reject NaN/Inf and corrupt values instead of feeding them to the renderer.
-        constexpr float MAX_LOCAL_LIGHT_OFFSET = 30.0f;
-        return IsFiniteVector(value) &&
-               std::fabs(value.x) <= MAX_LOCAL_LIGHT_OFFSET &&
-               std::fabs(value.y) <= MAX_LOCAL_LIGHT_OFFSET &&
-               std::fabs(value.z) <= MAX_LOCAL_LIGHT_OFFSET;
-    }
-
-    bool IsSaneWorldLightPosition(const CVector& value)
-    {
-        // Allow custom maps, but reject obviously corrupt world coordinates.
-        constexpr float MAX_WORLD_COORDINATE = 100000.0f;
-        return IsFiniteVector(value) &&
-               std::fabs(value.x) <= MAX_WORLD_COORDINATE &&
-               std::fabs(value.y) <= MAX_WORLD_COORDINATE &&
-               std::fabs(value.z) <= MAX_WORLD_COORDINATE;
-    }
-
-    bool IsModelQuarantined(int modelIndex)
-    {
-        for (int i = 0; i < nQuarantinedModelIndices; ++i)
-        {
-            if (aQuarantinedModelIndices[i] == modelIndex)
-                return true;
-        }
-        return false;
-    }
-
-    bool QuarantineModel(int modelIndex)
-    {
-        if (modelIndex < 0)
-            return false;
-        if (IsModelQuarantined(modelIndex))
-            return true;
-        if (nQuarantinedModelIndices >= MAX_QUARANTINED_MODEL_INDICES)
-            return false;
-        aQuarantinedModelIndices[nQuarantinedModelIndices++] = modelIndex;
-        return true;
-    }
-
     float Clamp01(float value)
     {
         return std::max(0.0f, std::min(1.0f, value));
     }
 
-    float SmoothStep(float edge0, float edge1, float value)
-    {
-        if (edge0 == edge1)
-            return value < edge0 ? 0.0f : 1.0f;
-
-        const float t = Clamp01((value - edge0) / (edge1 - edge0));
-        return t * t * (3.0f - 2.0f * t);
-    }
-
-    // Quintic easing gives a softer transition at both ends than SmoothStep.
+    // Quintic easing gives a smooth transition at both ends.
     float SmootherStep(float edge0, float edge1, float value)
     {
         if (edge0 == edge1)
@@ -223,9 +156,6 @@ namespace
                              const HeadlightColour& colour, float intensity,
                              float angleFade)
     {
-        if (!IsSaneWorldLightPosition(worldPos))
-            return false;
-
         const RwV3d position = { worldPos.x, worldPos.y, worldPos.z };
         RwV3d screenPosition{};
         float projectedWidth = 0.0f;
@@ -233,10 +163,6 @@ namespace
 
         if (!CSprite::CalcScreenCoors(position, &screenPosition,
                                       &projectedWidth, &projectedHeight, false, false))
-            return false;
-        if (!std::isfinite(screenPosition.x) || !std::isfinite(screenPosition.y) ||
-            !std::isfinite(screenPosition.z) || !std::isfinite(projectedWidth) ||
-            !std::isfinite(projectedHeight))
             return false;
 
         // CalcScreenCoors can succeed for points that project outside the viewport.
@@ -270,7 +196,7 @@ namespace
         sample.red = colour.red;
         sample.green = colour.green;
         sample.blue = colour.blue;
-        const float distanceFade = 1.0f - SmoothStep(
+        const float distanceFade = 1.0f - SmootherStep(
             fStreakDistanceFadeStart, fStreakDistanceFadeEnd, screenPosition.z);
         sample.intensity = Clamp01(intensity) * distanceFade;
         sample.angleFade = Clamp01(angleFade);
@@ -336,11 +262,7 @@ namespace
                             unsigned char green, unsigned char blue,
                             short intensity)
     {
-        if (!sample.valid || sample.recipZ <= 0.0f || intensity <= 0 ||
-            !std::isfinite(sample.x) || !std::isfinite(sample.y) ||
-            !std::isfinite(sample.z) || !std::isfinite(sample.recipZ) ||
-            !std::isfinite(halfWidth) || !std::isfinite(halfHeight) ||
-            halfWidth <= 0.0f || halfHeight <= 0.0f)
+        if (!sample.valid || sample.recipZ <= 0.0f || intensity <= 0)
             return;
 
         // SA's sprite implementation scales RGB by the short intensity value;
@@ -542,8 +464,7 @@ namespace
 
     bool IsPositionSet(const CVector& position)
     {
-        return IsSaneLocalLightPosition(position) &&
-               (position.x != 0.0f || position.y != 0.0f || position.z != 0.0f);
+        return position.x != 0.0f || position.y != 0.0f || position.z != 0.0f;
     }
 
     void GetVehicleLightPositions(CVehicle* vehicle, CVehicleModelInfo* modelInfo,
@@ -566,14 +487,6 @@ namespace
     {
         const CVector& cameraPos = TheCamera.m_mCameraMatrix.pos;
         const CVector& vehiclePos = vehicle->m_matrix->pos;
-        const CVector& forward = vehicle->m_matrix->up;
-
-        if (!IsSaneWorldLightPosition(cameraPos) ||
-            !IsSaneWorldLightPosition(vehiclePos) || !IsFiniteVector(forward))
-        {
-            camDist = 1000000.0f;
-            return 0.0f;
-        }
 
         CVector lookVector(
             vehiclePos.x - cameraPos.x,
@@ -599,6 +512,7 @@ namespace
             lookVector = CVector(1.0f, 0.0f, 0.0f);
         }
 
+        const CVector& forward = vehicle->m_matrix->up;
         float behindness = lookVector.x * forward.x +
                            lookVector.y * forward.y +
                            lookVector.z * forward.z;
@@ -627,10 +541,6 @@ namespace
                              float size, float farClip, eCoronaType coronaType,
                              float angle)
     {
-        if (!IsSaneWorldLightPosition(position) || !std::isfinite(size) ||
-            !std::isfinite(farClip) || !std::isfinite(angle))
-            return;
-
         CCoronas::RegisterCorona(
             coronaId, nullptr,
             colour.red, colour.green, colour.blue, alpha,
@@ -659,10 +569,12 @@ namespace
     }
 
     void RegisterReverseLightCore(unsigned int coronaId, const CVector& position,
-                                  float angle, float fade, float sizeScale)
+                                  float angle, float fade, float sizeScale,
+                                  float brightnessScale)
     {
         const float scaledAlpha = std::min(
-            255.0f, 190.0f * Clamp01(fade) * std::max(0.0f, fReverseCoreBrightness));
+            255.0f, 190.0f * Clamp01(fade) *
+                std::max(0.0f, fReverseCoreBrightness) * Clamp01(brightnessScale));
         RegisterLightCorona(coronaId, position, { 200, 215, 235 },
                             static_cast<unsigned char>(scaledAlpha),
                             0.9f * REVERSE_LIGHT_CORE_SIZE_MULTIPLIER *
@@ -686,32 +598,35 @@ namespace
     }
 
     void ProcessReverseLights(bool reversing, bool isMotorcycle,
-                              float behindness, float camDist,
+                              float reverseBrightnessScale,
+                              float behindness, float coreDistanceFade,
                               unsigned int baseId, float angle,
                               const CVector& lightL, const CVector& lightR)
     {
         // Reverse cores use a narrow angle and distance envelope.
-        const float coreAngleFade = SmoothStep(
+        const float coreAngleFade = SmootherStep(
             fReverseCoreAngleFadeStart, fReverseCoreAngleFadeEnd, behindness);
-        const float coreDistanceFade = 1.0f - SmoothStep(
-            fFrontCoreDistanceFadeStart, fFrontCoreDistanceFadeEnd, camDist);
         const float coreFade = reversing ? coreAngleFade * coreDistanceFade : 0.0f;
 
         const float coreSizeScale = isMotorcycle
             ? fBikeReverseCoreSizeMult : 1.0f;
-        RegisterReverseLightCore(baseId + 0x79u, lightL, angle, coreFade, coreSizeScale);
-        RegisterReverseLightCore(baseId + 0x7Au, lightR, angle, coreFade, coreSizeScale);
+        RegisterReverseLightCore(baseId + 0x79u, lightL, angle, coreFade, coreSizeScale,
+                                reverseBrightnessScale);
+        RegisterReverseLightCore(baseId + 0x7Au, lightR, angle, coreFade, coreSizeScale,
+                                reverseBrightnessScale);
     }
 
     void RegisterRearLampCore(unsigned int coronaId, const CVector& position,
                               const HeadlightColour& colour, float angle, float fade,
-                              float sizeScale, bool isReverse)
+                              float sizeScale, bool isReverse,
+                              float reverseBrightnessScale)
     {
         // The round side-view replacement is intentionally smaller than the
         // main rear-view streak, so it reads as a compact lamp instead of a halo.
         const float maxAlpha = isReverse ? 78.0f : 95.0f;
         const float brightness = isReverse
-            ? fReverseCoreBrightness : fRearRoundCoreBrightness;
+            ? fReverseCoreBrightness * Clamp01(reverseBrightnessScale)
+            : fRearRoundCoreBrightness;
         const float coreSizeScale = isReverse
             ? fReverseCoreSizeScale : fRearRoundCoreSizeScale;
         const float scaledAlpha = std::min(
@@ -723,8 +638,8 @@ namespace
     }
 
     void ProcessRearLights(CVehicle* vehicle, bool reversing, bool isMotorcycle,
-                          float behindness, float camDist,
-                          unsigned int baseId,
+                          float reverseBrightnessScale, float behindness,
+                          float camDist, unsigned int baseId, float angle,
                           const CVector& lightL, const CVector& lightR)
     {
         const unsigned int leftStreakId = baseId + 0x7Du;
@@ -736,14 +651,14 @@ namespace
         const float rearVisibility = rearVisibilityFade * rearVisibilityFade;
 
         const bool effectEnabled = vehicle->bLightsOn || reversing;
-        const float normalIntensity = std::max(0.0f,
-            std::min(1.0f, 0.38f + 0.30f * behindness));
+        const float normalIntensity = Clamp01(0.38f + 0.30f * behindness);
 
         // The streak and side-view corona share the same colour transition.
         const HeadlightColour streakColour = reversing
             ? HeadlightColour{ 205, 220, 250 }
             : HeadlightColour{ 255, 24, 12 };
-        const float streakBrightness = reversing ? 0.60f : normalIntensity;
+        const float streakBrightness = reversing
+            ? 0.60f * Clamp01(reverseBrightnessScale) : normalIntensity;
         // Fade only the normal red taillight streak in with distance. Near the
         // camera the stock red tail lamps remain, but the custom long red line is
         // hidden; it then grows smoothly instead of popping in at one distance.
@@ -761,13 +676,14 @@ namespace
         const float roundFade = effectEnabled
             ? roundEntryFade * roundExitFade
             : 0.0f;
-        const float angle = std::acos(std::max(-1.0f, std::min(1.0f, behindness)));
         const float reverseLampSizeScale = reversing && isMotorcycle
             ? fBikeReverseCoreSizeMult : 1.0f;
         RegisterRearLampCore(baseId + 0x81u, lightL, streakColour, angle,
-                                  roundFade, reverseLampSizeScale, reversing);
+                             roundFade, reverseLampSizeScale, reversing,
+                             reverseBrightnessScale);
         RegisterRearLampCore(baseId + 0x82u, lightR, streakColour, angle,
-                                  roundFade, reverseLampSizeScale, reversing);
+                             roundFade, reverseLampSizeScale, reversing,
+                             reverseBrightnessScale);
 
         // Do not register another long native corona for ordinary tail lamps.
         // The stock lamps remain intact; the custom layer draws the elongated line
@@ -808,20 +724,8 @@ namespace
         if (!vehicle || !vehicle->m_matrix)
             return;
 
-        const CMatrix& vehicleMatrix = *vehicle->m_matrix;
-        if (!IsSaneWorldLightPosition(vehicleMatrix.pos) ||
-            !IsFiniteVector(vehicleMatrix.right) ||
-            !IsFiniteVector(vehicleMatrix.up) ||
-            !IsFiniteVector(vehicleMatrix.at))
-            return;
-
         CVehicleModelInfo* modelInfo = static_cast<CVehicleModelInfo*>(
             CModelInfo::GetModelInfo(vehicle->m_nModelIndex));
-
-        // Without the vehicle structure, dummy data is unavailable/unreliable.
-        // Skip this model's custom lighting; the game's own light system remains untouched.
-        if (!modelInfo || !modelInfo->m_pVehicleStruct)
-            return;
 
         bool leftLightWorking = true;
         bool rightLightWorking = true;
@@ -834,25 +738,22 @@ namespace
 
         float camDist = 0.0f;
         const float behindness = GetCameraBehindness(vehicle, camDist);
-        if (!std::isfinite(behindness) || !std::isfinite(camDist) || camDist < 0.0f)
-            return;
-
+        const float coreDistanceFade = 1.0f - SmootherStep(
+            fFrontCoreDistanceFadeStart, fFrontCoreDistanceFadeEnd, camDist);
         const unsigned int baseId = static_cast<unsigned int>(
             reinterpret_cast<std::uintptr_t>(vehicle));
         const float angle = std::acos(behindness);
         const HeadlightColour colour = GetHeadlightColour(vehicle);
         const bool reversing = IsVehicleReversing(vehicle);
         const bool isMotorcycle = modelInfo && modelInfo->m_nVehicleType == VEHICLE_BIKE;
+        const bool isQuadbike = vehicle->m_nModelIndex == QUADBIKE_MODEL_ID;
+        const float reverseBrightnessScale = (isMotorcycle || isQuadbike)
+            ? Clamp01(fBikeReverseBrightnessMult) : 1.0f;
 
         CVector localRearLeft(-DEFAULT_HEADLIGHT_X, DEFAULT_REAR_LIGHT_Y, DEFAULT_HEADLIGHT_Z);
         CVector rearLightL, rearLightR;
         GetVehicleLightPositions(vehicle, modelInfo, DUMMY_REAR_LIGHTS,
                                  localRearLeft, rearLightL, rearLightR);
-
-        if (!IsSaneWorldLightPosition(lightL) || !IsSaneWorldLightPosition(lightR) ||
-            !IsSaneWorldLightPosition(rearLightL) || !IsSaneWorldLightPosition(rearLightR) ||
-            !std::isfinite(camDist) || camDist < 0.0f)
-            return;
 
         if (vehicle->bLightsOn)
         {
@@ -886,10 +787,8 @@ namespace
                 ClearStreakHistory(baseId + 0x72u);
 
             // Keep the round core's angle and distance fades narrower than the streak.
-            const float coreAngleFade = 1.0f - SmoothStep(
+            const float coreAngleFade = 1.0f - SmootherStep(
                 fFrontCoreAngleFadeStart, fFrontCoreAngleFadeEnd, behindness);
-            const float coreDistanceFade = 1.0f - SmoothStep(
-                fFrontCoreDistanceFadeStart, fFrontCoreDistanceFadeEnd, camDist);
             const float coreFade = coreAngleFade * coreDistanceFade;
 
             if (firstLightWorking && coreFade > 0.001f)
@@ -911,84 +810,14 @@ namespace
         }
 
         // Keep stock rear lamps and add the custom screen-space layer.
-        ProcessRearLights(vehicle, reversing, isMotorcycle, behindness,
-                                 camDist, baseId, rearLightL, rearLightR);
+        ProcessRearLights(vehicle, reversing, isMotorcycle, reverseBrightnessScale,
+                          behindness, camDist, baseId, angle, rearLightL, rearLightR);
 
         // Reverse lamps are independent of the headlight switch.
-        ProcessReverseLights(reversing, isMotorcycle, behindness,
-                                   camDist, baseId, angle,
-                                   rearLightL, rearLightR);
+        ProcessReverseLights(reversing, isMotorcycle, reverseBrightnessScale, behindness,
+                             coreDistanceFade, baseId, angle,
+                             rearLightL, rearLightR);
     }
-
-#if defined(_MSC_VER)
-    int FilterRecoverableVehicleException(unsigned long exceptionCode)
-    {
-        // Only recover from memory-access failures. Other exceptions should retain
-        // normal crash/debugger behavior rather than being silently swallowed.
-        if (exceptionCode == EXCEPTION_ACCESS_VIOLATION ||
-            exceptionCode == EXCEPTION_IN_PAGE_ERROR)
-            return EXCEPTION_EXECUTE_HANDLER;
-        return EXCEPTION_CONTINUE_SEARCH;
-    }
-
-    void ProcessVehicleLightsGuarded(CVehicle* vehicle)
-    {
-        if (bRuntimeFaultDetected || !vehicle)
-            return;
-
-        // Keep this SEH boundary free of C++ objects with non-trivial destructors.
-        // It is a last-resort barrier for malformed add-on vehicle/model data.
-        volatile int modelIndex = -1;
-        __try
-        {
-            modelIndex = vehicle->m_nModelIndex;
-            if (IsModelQuarantined(modelIndex))
-                return;
-            ProcessVehicleLights(vehicle);
-        }
-        __except (FilterRecoverableVehicleException(GetExceptionCode()))
-        {
-            if (modelIndex < 0 || !QuarantineModel(modelIndex))
-            {
-                // Unknown fault source or quarantine table full: fail closed.
-                bRuntimeFaultDetected = true;
-                bCustomStreakEnabled = 0;
-            }
-        }
-    }
-
-    void RenderStreaksGuarded()
-    {
-        if (bRuntimeFaultDetected)
-            return;
-
-        __try
-        {
-            RenderStreaks();
-        }
-        __except (FilterRecoverableVehicleException(GetExceptionCode()))
-        {
-            // Rendering faults are not safely attributable to one vehicle. Turn
-            // off only this plugin's custom layer; stock game rendering continues.
-            bRuntimeFaultDetected = true;
-            bCustomStreakEnabled = 0;
-        }
-    }
-#else
-    // GTA SA ASI plugins are normally built with MSVC. Keep other toolchains
-    // buildable, while retaining all deterministic pointer/coordinate validation.
-    void ProcessVehicleLightsGuarded(CVehicle* vehicle)
-    {
-        if (!bRuntimeFaultDetected && vehicle)
-            ProcessVehicleLights(vehicle);
-    }
-
-    void RenderStreaksGuarded()
-    {
-        if (!bRuntimeFaultDetected)
-            RenderStreaks();
-    }
-#endif
 
     void ResetStreakDebugSettings()
     {
@@ -1009,6 +838,7 @@ namespace
         fReverseCoreBrightness = 1.0f;
         fBikeReverseStreakSizeMult = 0.55f;
         fBikeReverseCoreSizeMult = 0.60f;
+        fBikeReverseBrightnessMult = 0.85f;
         fSideAngleExponent = 4.0f;
         fFrontAngleFadeStart = -0.88f;
         fFrontAngleFadeEnd = -0.25f;
@@ -1105,6 +935,8 @@ namespace
                         nullptr, 0.05f, 0.10f, 1.00f);
         DebugMenuAddVar("SA Streaks|Reverse", "Bike core size", &fBikeReverseCoreSizeMult,
                         nullptr, 0.05f, 0.10f, 1.00f);
+        DebugMenuAddVar("SA Streaks|Reverse", "Bike/quad brightness", &fBikeReverseBrightnessMult,
+                        nullptr, 0.05f, 0.0f, 1.0f);
         DebugMenuAddVar("SA Streaks|Reverse", "Core angle start", &fReverseCoreAngleFadeStart,
                         nullptr, 0.01f, 0.50f, 0.95f);
         DebugMenuAddVar("SA Streaks|Reverse", "Core angle end", &fReverseCoreAngleFadeEnd,
@@ -1128,8 +960,8 @@ namespace
             // ahead of time to avoid hash-table reallocation during render events.
             StreakHistoryById.reserve(512);
             plugin::Events::initGameEvent += RegisterStreakDebugMenu;
-            plugin::Events::vehicleRenderEvent += ProcessVehicleLightsGuarded;
-            plugin::Events::drawingEvent += RenderStreaksGuarded;
+            plugin::Events::vehicleRenderEvent += ProcessVehicleLights;
+            plugin::Events::drawingEvent += RenderStreaks;
         }
     } pluginBootstrap;
 }
