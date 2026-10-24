@@ -1,4 +1,4 @@
-III Headlight Streaks
+III Streak Lights
 ====================
 
 ![Demo](screens/screen%20(1).png)
