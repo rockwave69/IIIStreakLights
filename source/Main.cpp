@@ -26,6 +26,8 @@ extern "C"
 // GTA San Andreas 1.0 US / Plugin-SDK.
 // Adds re3-inspired streaks while retaining the game's normal light system.
 // Screen-space history replaces the STREAK_ON flag unavailable through SA's corona API.
+// This plugin never dereferences vehicle headlight/taillight material pointers: it
+// uses guarded model dummy positions and native corona/sprite APIs instead.
 
 namespace
 {
@@ -106,6 +108,64 @@ namespace
 
     bool bDebugMenuRegistered = false;
 
+    // A fault in an add-on vehicle model must not take down the game. Model
+    // indices that trigger a recoverable access violation are quarantined for
+    // the rest of the session; if the bad pointer cannot be attributed to a
+    // model, the custom layer is disabled globally.
+    constexpr int MAX_QUARANTINED_MODEL_INDICES = 512;
+    int aQuarantinedModelIndices[MAX_QUARANTINED_MODEL_INDICES] = {};
+    int nQuarantinedModelIndices = 0;
+    bool bRuntimeFaultDetected = false;
+
+    bool IsFiniteVector(const CVector& value)
+    {
+        return std::isfinite(value.x) && std::isfinite(value.y) &&
+               std::isfinite(value.z);
+    }
+
+    bool IsSaneLocalLightPosition(const CVector& value)
+    {
+        // Vehicle dummy offsets should be small, local-space coordinates.
+        // Reject NaN/Inf and corrupt values instead of feeding them to the renderer.
+        constexpr float MAX_LOCAL_LIGHT_OFFSET = 30.0f;
+        return IsFiniteVector(value) &&
+               std::fabs(value.x) <= MAX_LOCAL_LIGHT_OFFSET &&
+               std::fabs(value.y) <= MAX_LOCAL_LIGHT_OFFSET &&
+               std::fabs(value.z) <= MAX_LOCAL_LIGHT_OFFSET;
+    }
+
+    bool IsSaneWorldLightPosition(const CVector& value)
+    {
+        // Allow custom maps, but reject obviously corrupt world coordinates.
+        constexpr float MAX_WORLD_COORDINATE = 100000.0f;
+        return IsFiniteVector(value) &&
+               std::fabs(value.x) <= MAX_WORLD_COORDINATE &&
+               std::fabs(value.y) <= MAX_WORLD_COORDINATE &&
+               std::fabs(value.z) <= MAX_WORLD_COORDINATE;
+    }
+
+    bool IsModelQuarantined(int modelIndex)
+    {
+        for (int i = 0; i < nQuarantinedModelIndices; ++i)
+        {
+            if (aQuarantinedModelIndices[i] == modelIndex)
+                return true;
+        }
+        return false;
+    }
+
+    bool QuarantineModel(int modelIndex)
+    {
+        if (modelIndex < 0)
+            return false;
+        if (IsModelQuarantined(modelIndex))
+            return true;
+        if (nQuarantinedModelIndices >= MAX_QUARANTINED_MODEL_INDICES)
+            return false;
+        aQuarantinedModelIndices[nQuarantinedModelIndices++] = modelIndex;
+        return true;
+    }
+
     float Clamp01(float value)
     {
         return std::max(0.0f, std::min(1.0f, value));
@@ -163,6 +223,9 @@ namespace
                              const HeadlightColour& colour, float intensity,
                              float angleFade)
     {
+        if (!IsSaneWorldLightPosition(worldPos))
+            return false;
+
         const RwV3d position = { worldPos.x, worldPos.y, worldPos.z };
         RwV3d screenPosition{};
         float projectedWidth = 0.0f;
@@ -170,6 +233,10 @@ namespace
 
         if (!CSprite::CalcScreenCoors(position, &screenPosition,
                                       &projectedWidth, &projectedHeight, false, false))
+            return false;
+        if (!std::isfinite(screenPosition.x) || !std::isfinite(screenPosition.y) ||
+            !std::isfinite(screenPosition.z) || !std::isfinite(projectedWidth) ||
+            !std::isfinite(projectedHeight))
             return false;
 
         // CalcScreenCoors can succeed for points that project outside the viewport.
@@ -269,7 +336,11 @@ namespace
                             unsigned char green, unsigned char blue,
                             short intensity)
     {
-        if (!sample.valid || sample.recipZ <= 0.0f || intensity <= 0)
+        if (!sample.valid || sample.recipZ <= 0.0f || intensity <= 0 ||
+            !std::isfinite(sample.x) || !std::isfinite(sample.y) ||
+            !std::isfinite(sample.z) || !std::isfinite(sample.recipZ) ||
+            !std::isfinite(halfWidth) || !std::isfinite(halfHeight) ||
+            halfWidth <= 0.0f || halfHeight <= 0.0f)
             return;
 
         // SA's sprite implementation scales RGB by the short intensity value;
@@ -471,7 +542,8 @@ namespace
 
     bool IsPositionSet(const CVector& position)
     {
-        return position.x != 0.0f || position.y != 0.0f || position.z != 0.0f;
+        return IsSaneLocalLightPosition(position) &&
+               (position.x != 0.0f || position.y != 0.0f || position.z != 0.0f);
     }
 
     void GetVehicleLightPositions(CVehicle* vehicle, CVehicleModelInfo* modelInfo,
@@ -494,6 +566,14 @@ namespace
     {
         const CVector& cameraPos = TheCamera.m_mCameraMatrix.pos;
         const CVector& vehiclePos = vehicle->m_matrix->pos;
+        const CVector& forward = vehicle->m_matrix->up;
+
+        if (!IsSaneWorldLightPosition(cameraPos) ||
+            !IsSaneWorldLightPosition(vehiclePos) || !IsFiniteVector(forward))
+        {
+            camDist = 1000000.0f;
+            return 0.0f;
+        }
 
         CVector lookVector(
             vehiclePos.x - cameraPos.x,
@@ -519,7 +599,6 @@ namespace
             lookVector = CVector(1.0f, 0.0f, 0.0f);
         }
 
-        const CVector& forward = vehicle->m_matrix->up;
         float behindness = lookVector.x * forward.x +
                            lookVector.y * forward.y +
                            lookVector.z * forward.z;
@@ -548,6 +627,10 @@ namespace
                              float size, float farClip, eCoronaType coronaType,
                              float angle)
     {
+        if (!IsSaneWorldLightPosition(position) || !std::isfinite(size) ||
+            !std::isfinite(farClip) || !std::isfinite(angle))
+            return;
+
         CCoronas::RegisterCorona(
             coronaId, nullptr,
             colour.red, colour.green, colour.blue, alpha,
@@ -725,8 +808,20 @@ namespace
         if (!vehicle || !vehicle->m_matrix)
             return;
 
+        const CMatrix& vehicleMatrix = *vehicle->m_matrix;
+        if (!IsSaneWorldLightPosition(vehicleMatrix.pos) ||
+            !IsFiniteVector(vehicleMatrix.right) ||
+            !IsFiniteVector(vehicleMatrix.up) ||
+            !IsFiniteVector(vehicleMatrix.at))
+            return;
+
         CVehicleModelInfo* modelInfo = static_cast<CVehicleModelInfo*>(
             CModelInfo::GetModelInfo(vehicle->m_nModelIndex));
+
+        // Without the vehicle structure, dummy data is unavailable/unreliable.
+        // Skip this model's custom lighting; the game's own light system remains untouched.
+        if (!modelInfo || !modelInfo->m_pVehicleStruct)
+            return;
 
         bool leftLightWorking = true;
         bool rightLightWorking = true;
@@ -739,6 +834,9 @@ namespace
 
         float camDist = 0.0f;
         const float behindness = GetCameraBehindness(vehicle, camDist);
+        if (!std::isfinite(behindness) || !std::isfinite(camDist) || camDist < 0.0f)
+            return;
+
         const unsigned int baseId = static_cast<unsigned int>(
             reinterpret_cast<std::uintptr_t>(vehicle));
         const float angle = std::acos(behindness);
@@ -750,6 +848,11 @@ namespace
         CVector rearLightL, rearLightR;
         GetVehicleLightPositions(vehicle, modelInfo, DUMMY_REAR_LIGHTS,
                                  localRearLeft, rearLightL, rearLightR);
+
+        if (!IsSaneWorldLightPosition(lightL) || !IsSaneWorldLightPosition(lightR) ||
+            !IsSaneWorldLightPosition(rearLightL) || !IsSaneWorldLightPosition(rearLightR) ||
+            !std::isfinite(camDist) || camDist < 0.0f)
+            return;
 
         if (vehicle->bLightsOn)
         {
@@ -816,6 +919,76 @@ namespace
                                    camDist, baseId, angle,
                                    rearLightL, rearLightR);
     }
+
+#if defined(_MSC_VER)
+    int FilterRecoverableVehicleException(unsigned long exceptionCode)
+    {
+        // Only recover from memory-access failures. Other exceptions should retain
+        // normal crash/debugger behavior rather than being silently swallowed.
+        if (exceptionCode == EXCEPTION_ACCESS_VIOLATION ||
+            exceptionCode == EXCEPTION_IN_PAGE_ERROR)
+            return EXCEPTION_EXECUTE_HANDLER;
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    void ProcessVehicleLightsGuarded(CVehicle* vehicle)
+    {
+        if (bRuntimeFaultDetected || !vehicle)
+            return;
+
+        // Keep this SEH boundary free of C++ objects with non-trivial destructors.
+        // It is a last-resort barrier for malformed add-on vehicle/model data.
+        volatile int modelIndex = -1;
+        __try
+        {
+            modelIndex = vehicle->m_nModelIndex;
+            if (IsModelQuarantined(modelIndex))
+                return;
+            ProcessVehicleLights(vehicle);
+        }
+        __except (FilterRecoverableVehicleException(GetExceptionCode()))
+        {
+            if (modelIndex < 0 || !QuarantineModel(modelIndex))
+            {
+                // Unknown fault source or quarantine table full: fail closed.
+                bRuntimeFaultDetected = true;
+                bCustomStreakEnabled = 0;
+            }
+        }
+    }
+
+    void RenderStreaksGuarded()
+    {
+        if (bRuntimeFaultDetected)
+            return;
+
+        __try
+        {
+            RenderStreaks();
+        }
+        __except (FilterRecoverableVehicleException(GetExceptionCode()))
+        {
+            // Rendering faults are not safely attributable to one vehicle. Turn
+            // off only this plugin's custom layer; stock game rendering continues.
+            bRuntimeFaultDetected = true;
+            bCustomStreakEnabled = 0;
+        }
+    }
+#else
+    // GTA SA ASI plugins are normally built with MSVC. Keep other toolchains
+    // buildable, while retaining all deterministic pointer/coordinate validation.
+    void ProcessVehicleLightsGuarded(CVehicle* vehicle)
+    {
+        if (!bRuntimeFaultDetected && vehicle)
+            ProcessVehicleLights(vehicle);
+    }
+
+    void RenderStreaksGuarded()
+    {
+        if (!bRuntimeFaultDetected)
+            RenderStreaks();
+    }
+#endif
 
     void ResetStreakDebugSettings()
     {
@@ -955,8 +1128,8 @@ namespace
             // ahead of time to avoid hash-table reallocation during render events.
             StreakHistoryById.reserve(512);
             plugin::Events::initGameEvent += RegisterStreakDebugMenu;
-            plugin::Events::vehicleRenderEvent += ProcessVehicleLights;
-            plugin::Events::drawingEvent += RenderStreaks;
+            plugin::Events::vehicleRenderEvent += ProcessVehicleLightsGuarded;
+            plugin::Events::drawingEvent += RenderStreaksGuarded;
         }
     } pluginBootstrap;
 }
