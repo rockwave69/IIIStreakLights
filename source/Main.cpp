@@ -70,7 +70,7 @@ namespace
     float fFrontStreakHeightScale = 1.0f;
     float fFrontStreakBrightness = 1.0f;
     float fFrontCoreSizeScale = 1.0f;
-    float fFrontCoreBrightness = 0.84f;
+    float fFrontCoreBrightness = 0.65f;
 
     float fRearStreakLengthScale = 1.0f;
     float fRearStreakHeightScale = 1.0f;
@@ -85,7 +85,7 @@ namespace
 
     float fBikeReverseStreakSizeMult = 0.55f;
     float fBikeReverseCoreSizeMult = 0.60f;
-    float fBikeReverseBrightnessMult = 0.85f;
+    float fBikeReverseBrightnessMult = 0.35f;
 
     float fSideAngleExponent = 4.0f;
     float fFrontAngleFadeStart = -0.88f;
@@ -826,7 +826,7 @@ namespace
         fFrontStreakHeightScale = 1.0f;
         fFrontStreakBrightness = 1.0f;
         fFrontCoreSizeScale = 1.0f;
-        fFrontCoreBrightness = 0.84f;
+        fFrontCoreBrightness = 0.65f;
         fRearStreakLengthScale = 1.0f;
         fRearStreakHeightScale = 1.0f;
         fRearStreakBrightness = 1.0f;
@@ -838,7 +838,7 @@ namespace
         fReverseCoreBrightness = 1.0f;
         fBikeReverseStreakSizeMult = 0.55f;
         fBikeReverseCoreSizeMult = 0.60f;
-        fBikeReverseBrightnessMult = 0.85f;
+        fBikeReverseBrightnessMult = 0.35f;
         fSideAngleExponent = 4.0f;
         fFrontAngleFadeStart = -0.88f;
         fFrontAngleFadeEnd = -0.25f;
