@@ -15,6 +15,10 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cwchar>
+#include <cwctype>
+#include <string>
+#include <vector>
 #include <unordered_map>
 
 extern "C"
@@ -22,7 +26,6 @@ extern "C"
     DebugMenuAPI gDebugMenuAPI = {};
 }
 
-// Main_Re3StyleStreak_Professional.cpp
 // GTA San Andreas 1.0 US / Plugin-SDK.
 // Adds re3-inspired streaks while retaining the game's normal light system.
 // Screen-space history replaces the STREAK_ON flag unavailable through SA's corona API.
@@ -47,9 +50,9 @@ namespace
 
     struct HeadlightColour
     {
-        unsigned char red;
-        unsigned char green;
-        unsigned char blue;
+        unsigned char Red;
+        unsigned char Green;
+        unsigned char Blue;
     };
 
     // SA does not expose re3's STREAK_ON flag, so keep a short screen-space history.
@@ -63,50 +66,250 @@ namespace
     constexpr float REAR_STREAK_MAX_HALF_WIDTH = 205.0f;
     constexpr float REAR_STREAK_BASE_ALPHA = 68.0f;
 
-    // Runtime-tunable values exposed through the debug menu.
-    int32_t bCustomStreakEnabled = 1;
+    // Set in DllMain; the INI is resolved relative to this ASI/DLL, not the game working directory.
+    HMODULE s_PluginModuleHandle = nullptr;
 
-    float fFrontStreakLengthScale = 1.0f;
-    float fFrontStreakHeightScale = 1.0f;
-    float fFrontStreakBrightness = 1.0f;
-    float fFrontCoreSizeScale = 1.0f;
-    float fFrontCoreBrightness = 0.65f;
+    // Runtime settings exposed through the debug menu and optional INI file.
+    std::int32_t s_CustomStreakEnabled = 1;
 
-    float fRearStreakLengthScale = 1.0f;
-    float fRearStreakHeightScale = 1.0f;
-    float fRearStreakBrightness = 1.0f;
-    float fRearRoundCoreSizeScale = 1.0f;
-    float fRearRoundCoreBrightness = 1.0f;
+    float s_FrontStreakLengthScale = 1.0f;
+    float s_FrontStreakHeightScale = 1.0f;
+    float s_FrontStreakBrightness = 1.0f;
+    float s_FrontCoreSizeScale = 1.0f;
+    float s_FrontCoreBrightness = 0.65f;
 
-    float fReverseStreakLengthScale = 1.0f;
-    float fReverseStreakBrightness = 1.0f;
-    float fReverseCoreSizeScale = 1.0f;
-    float fReverseCoreBrightness = 1.0f;
+    float s_RearStreakLengthScale = 1.0f;
+    float s_RearStreakHeightScale = 1.0f;
+    float s_RearStreakBrightness = 1.0f;
+    float s_RearRoundCoreSizeScale = 1.0f;
+    float s_RearRoundCoreBrightness = 1.0f;
 
-    float fBikeReverseStreakSizeMult = 0.55f;
-    float fBikeReverseCoreSizeMult = 0.60f;
-    float fBikeReverseBrightnessMult = 0.35f;
+    float s_ReverseStreakLengthScale = 1.0f;
+    float s_ReverseStreakBrightness = 1.0f;
+    float s_ReverseCoreSizeScale = 1.0f;
+    float s_ReverseCoreBrightness = 1.0f;
 
-    float fSideAngleExponent = 4.0f;
-    float fFrontAngleFadeStart = -0.88f;
-    float fFrontAngleFadeEnd = -0.25f;
-    float fFrontCoreAngleFadeStart = -0.995f;
-    float fFrontCoreAngleFadeEnd = -0.88f;
-    float fFrontCoreDistanceFadeStart = 23.0f;
-    float fFrontCoreDistanceFadeEnd = 32.0f;
-    float fReverseCoreAngleFadeStart = 0.80f;
-    float fReverseCoreAngleFadeEnd = 0.97f;
+    float s_BikeReverseStreakSizeMultiplier = 0.55f;
+    float s_BikeReverseCoreSizeMultiplier = 0.60f;
+    float s_BikeReverseBrightnessMultiplier = 0.35f;
 
-    float fRearTailDistanceFadeStart = 9.0f;
-    float fRearTailDistanceFadeEnd = 23.0f;
-    float fStreakDistanceFadeStart = 25.0f;
-    float fStreakDistanceFadeEnd = 40.0f;
-    float fRearRoundAngleEntryStart = -0.20f;
-    float fRearRoundAngleEntryEnd = 0.12f;
-    float fRearRoundAngleExitStart = 0.28f;
-    float fRearRoundAngleExitEnd = 0.78f;
+    float s_SideAngleExponent = 4.0f;
+    float s_FrontAngleFadeStart = -0.88f;
+    float s_FrontAngleFadeEnd = -0.25f;
+    float s_FrontCoreAngleFadeStart = -0.995f;
+    float s_FrontCoreAngleFadeEnd = -0.88f;
+    float s_FrontCoreDistanceFadeStart = 23.0f;
+    float s_FrontCoreDistanceFadeEnd = 32.0f;
+    float s_ReverseCoreAngleFadeStart = 0.80f;
+    float s_ReverseCoreAngleFadeEnd = 0.97f;
 
-    bool bDebugMenuRegistered = false;
+    float s_RearTailDistanceFadeStart = 9.0f;
+    float s_RearTailDistanceFadeEnd = 23.0f;
+    float s_StreakDistanceFadeStart = 25.0f;
+    float s_StreakDistanceFadeEnd = 40.0f;
+    float s_RearRoundAngleEntryStart = -0.20f;
+    float s_RearRoundAngleEntryEnd = 0.12f;
+    float s_RearRoundAngleExitStart = 0.28f;
+    float s_RearRoundAngleExitEnd = 0.78f;
+
+    bool s_DebugMenuRegistered = false;
+
+    std::wstring GetPluginConfigPath()
+    {
+        if (!s_PluginModuleHandle)
+            return {};
+
+        // Use a large buffer so a long installation path does not silently truncate.
+        std::vector<wchar_t> modulePath(32768, L'\0');
+        const DWORD pathLength = GetModuleFileNameW(
+            s_PluginModuleHandle, &modulePath[0], static_cast<DWORD>(modulePath.size()));
+        if (pathLength == 0 || pathLength >= modulePath.size())
+            return {};
+
+        std::wstring configPath(&modulePath[0], pathLength);
+        const std::wstring::size_type separator = configPath.find_last_of(L"\\/");
+        if (separator == std::wstring::npos)
+            return {};
+
+        configPath.resize(separator + 1);
+        configPath += L"IIIStreakLights.ini";
+        return configPath;
+    }
+
+    bool ReadIniNumber(const std::wstring& configPath, const wchar_t* section,
+                       const wchar_t* key, float& result)
+    {
+        wchar_t text[128] = {};
+        const DWORD length = GetPrivateProfileStringW(
+            section, key, L"", text,
+            static_cast<DWORD>(sizeof(text) / sizeof(text[0])), configPath.c_str());
+        if (length == 0)
+            return false;
+
+        wchar_t* end = nullptr;
+        const float value = std::wcstof(text, &end);
+        if (end == text || !std::isfinite(value))
+            return false;
+
+        while (*end && std::iswspace(*end))
+            ++end;
+        // Percentage entries may be written as either "65" or "65%".
+        if (*end == L'%')
+        {
+            ++end;
+            while (*end && std::iswspace(*end))
+                ++end;
+        }
+        if (*end != L'\0')
+            return false;
+
+        result = value;
+        return true;
+    }
+
+    bool ReadIniBool(const std::wstring& configPath, const wchar_t* section,
+                     const wchar_t* key, bool& result)
+    {
+        wchar_t text[32] = {};
+        const DWORD length = GetPrivateProfileStringW(
+            section, key, L"", text,
+            static_cast<DWORD>(sizeof(text) / sizeof(text[0])), configPath.c_str());
+        if (length == 0)
+            return false;
+
+        std::wstring value(text);
+        std::transform(value.begin(), value.end(), value.begin(),
+            [](wchar_t character) { return static_cast<wchar_t>(std::towlower(character)); });
+
+        if (value == L"true" || value == L"yes" || value == L"on")
+        {
+            result = true;
+            return true;
+        }
+        if (value == L"false" || value == L"no" || value == L"off")
+        {
+            result = false;
+            return true;
+        }
+
+        float number = 0.0f;
+        if (!ReadIniNumber(configPath, section, key, number))
+            return false;
+        result = number != 0.0f;
+        return true;
+    }
+
+    void ReadIniPercent(const std::wstring& configPath, const wchar_t* section,
+                        const wchar_t* key, float& setting,
+                        float minimumPercent, float maximumPercent)
+    {
+        float percentage = 0.0f;
+        if (ReadIniNumber(configPath, section, key, percentage))
+        {
+            percentage = std::max(minimumPercent, std::min(maximumPercent, percentage));
+            setting = percentage / 100.0f;
+        }
+    }
+
+    void ReadIniDistance(const std::wstring& configPath, const wchar_t* section,
+                         const wchar_t* key, float& setting,
+                         float minimumDistance, float maximumDistance)
+    {
+        float distance = 0.0f;
+        if (ReadIniNumber(configPath, section, key, distance))
+            setting = std::max(minimumDistance, std::min(maximumDistance, distance));
+    }
+
+    void ReadIniAngleDegrees(const std::wstring& configPath, const wchar_t* section,
+                             const wchar_t* key, float& setting)
+    {
+        float degrees = 0.0f;
+        if (!ReadIniNumber(configPath, section, key, degrees))
+            return;
+
+        degrees = std::max(0.0f, std::min(180.0f, degrees));
+        constexpr float DEGREES_TO_RADIANS = 0.017453292519943295f;
+        setting = std::cos(degrees * DEGREES_TO_RADIANS);
+    }
+
+    void LoadPluginConfig()
+    {
+        const std::wstring configPath = GetPluginConfigPath();
+        if (configPath.empty())
+            return;
+
+        // Missing file/keys leave the code-defined defaults unchanged.
+        bool enabled = s_CustomStreakEnabled != 0;
+        if (ReadIniBool(configPath, L"General", L"Enabled", enabled))
+            s_CustomStreakEnabled = enabled ? 1 : 0;
+
+        ReadIniPercent(configPath, L"Front", L"StreakLength", s_FrontStreakLengthScale, 25.0f, 250.0f);
+        ReadIniPercent(configPath, L"Front", L"StreakHeight", s_FrontStreakHeightScale, 50.0f, 200.0f);
+        ReadIniPercent(configPath, L"Front", L"StreakBrightness", s_FrontStreakBrightness, 0.0f, 150.0f);
+        ReadIniPercent(configPath, L"Front", L"CoreSize", s_FrontCoreSizeScale, 40.0f, 180.0f);
+        ReadIniPercent(configPath, L"Front", L"CoreBrightness", s_FrontCoreBrightness, 0.0f, 100.0f);
+        ReadIniAngleDegrees(configPath, L"Front", L"AngleFadeStartDegrees", s_FrontAngleFadeStart);
+        ReadIniAngleDegrees(configPath, L"Front", L"AngleFadeEndDegrees", s_FrontAngleFadeEnd);
+        ReadIniAngleDegrees(configPath, L"Front", L"CoreAngleFadeStartDegrees", s_FrontCoreAngleFadeStart);
+        ReadIniAngleDegrees(configPath, L"Front", L"CoreAngleFadeEndDegrees", s_FrontCoreAngleFadeEnd);
+        ReadIniDistance(configPath, L"Front", L"CoreDistanceFadeStart", s_FrontCoreDistanceFadeStart, 5.0f, 30.0f);
+        ReadIniDistance(configPath, L"Front", L"CoreDistanceFadeEnd", s_FrontCoreDistanceFadeEnd, 31.0f, 45.0f);
+
+        ReadIniPercent(configPath, L"Rear", L"StreakLength", s_RearStreakLengthScale, 25.0f, 250.0f);
+        ReadIniPercent(configPath, L"Rear", L"StreakHeight", s_RearStreakHeightScale, 50.0f, 200.0f);
+        ReadIniPercent(configPath, L"Rear", L"StreakBrightness", s_RearStreakBrightness, 0.0f, 150.0f);
+        ReadIniPercent(configPath, L"Rear", L"SideCoreSize", s_RearRoundCoreSizeScale, 20.0f, 200.0f);
+        ReadIniPercent(configPath, L"Rear", L"SideCoreBrightness", s_RearRoundCoreBrightness, 0.0f, 100.0f);
+        ReadIniDistance(configPath, L"Rear", L"DistanceFadeStart", s_RearTailDistanceFadeStart, 2.0f, 20.0f);
+        ReadIniDistance(configPath, L"Rear", L"DistanceFadeEnd", s_RearTailDistanceFadeEnd, 21.0f, 35.0f);
+        ReadIniAngleDegrees(configPath, L"Rear", L"RoundEntryAngleStartDegrees", s_RearRoundAngleEntryStart);
+        ReadIniAngleDegrees(configPath, L"Rear", L"RoundEntryAngleEndDegrees", s_RearRoundAngleEntryEnd);
+        ReadIniAngleDegrees(configPath, L"Rear", L"RoundExitAngleStartDegrees", s_RearRoundAngleExitStart);
+        ReadIniAngleDegrees(configPath, L"Rear", L"RoundExitAngleEndDegrees", s_RearRoundAngleExitEnd);
+
+        ReadIniPercent(configPath, L"Reverse", L"StreakLength", s_ReverseStreakLengthScale, 25.0f, 250.0f);
+        ReadIniPercent(configPath, L"Reverse", L"StreakBrightness", s_ReverseStreakBrightness, 0.0f, 150.0f);
+        ReadIniPercent(configPath, L"Reverse", L"CoreSize", s_ReverseCoreSizeScale, 40.0f, 160.0f);
+        ReadIniPercent(configPath, L"Reverse", L"CoreBrightness", s_ReverseCoreBrightness, 0.0f, 100.0f);
+        ReadIniPercent(configPath, L"Reverse", L"BikeStreakSize", s_BikeReverseStreakSizeMultiplier, 10.0f, 100.0f);
+        ReadIniPercent(configPath, L"Reverse", L"BikeCoreSize", s_BikeReverseCoreSizeMultiplier, 10.0f, 100.0f);
+        ReadIniPercent(configPath, L"Reverse", L"BikeQuadBrightness", s_BikeReverseBrightnessMultiplier, 0.0f, 100.0f);
+        ReadIniAngleDegrees(configPath, L"Reverse", L"CoreAngleFadeStartDegrees", s_ReverseCoreAngleFadeStart);
+        ReadIniAngleDegrees(configPath, L"Reverse", L"CoreAngleFadeEndDegrees", s_ReverseCoreAngleFadeEnd);
+
+        ReadIniNumber(configPath, L"Advanced", L"SideAngleExponent", s_SideAngleExponent);
+        s_SideAngleExponent = std::max(2.0f, std::min(8.0f, s_SideAngleExponent));
+        ReadIniDistance(configPath, L"Advanced", L"StreakDistanceFadeStart", s_StreakDistanceFadeStart, 5.0f, 38.0f);
+        ReadIniDistance(configPath, L"Advanced", L"StreakDistanceFadeEnd", s_StreakDistanceFadeEnd, 39.0f, 50.0f);
+
+        // Fade edges must remain ordered in cosine/dot-product space.
+        // If a pair is misconfigured, fall back to its built-in values.
+        if (s_FrontAngleFadeStart >= s_FrontAngleFadeEnd)
+        {
+            s_FrontAngleFadeStart = -0.88f;
+            s_FrontAngleFadeEnd = -0.25f;
+        }
+        if (s_FrontCoreAngleFadeStart >= s_FrontCoreAngleFadeEnd)
+        {
+            s_FrontCoreAngleFadeStart = -0.995f;
+            s_FrontCoreAngleFadeEnd = -0.88f;
+        }
+        if (s_ReverseCoreAngleFadeStart >= s_ReverseCoreAngleFadeEnd)
+        {
+            s_ReverseCoreAngleFadeStart = 0.80f;
+            s_ReverseCoreAngleFadeEnd = 0.97f;
+        }
+        if (s_RearRoundAngleEntryStart >= s_RearRoundAngleEntryEnd)
+        {
+            s_RearRoundAngleEntryStart = -0.20f;
+            s_RearRoundAngleEntryEnd = 0.12f;
+        }
+        if (s_RearRoundAngleExitStart >= s_RearRoundAngleExitEnd)
+        {
+            s_RearRoundAngleExitStart = 0.28f;
+            s_RearRoundAngleExitEnd = 0.78f;
+        }
+    }
 
     float Clamp01(float value)
     {
@@ -123,40 +326,40 @@ namespace
         return t * t * t * (t * (t * 6.0f - 15.0f) + 10.0f);
     }
 
-    struct CStreakSample
+    struct StreakSample
     {
-        float x = 0.0f;
-        float y = 0.0f;
-        float z = 0.0f;
-        float recipZ = 0.0f;
-        unsigned char red = 255;
-        unsigned char green = 255;
-        unsigned char blue = 255;
-        float intensity = 1.0f;
+        float ScreenX = 0.0f;
+        float ScreenY = 0.0f;
+        float Depth = 0.0f;
+        float ReciprocalDepth = 0.0f;
+        unsigned char Red = 255;
+        unsigned char Green = 255;
+        unsigned char Blue = 255;
+        float Intensity = 1.0f;
         // Independent angular visibility used to scale streak length under oblique views.
-        float angleFade = 1.0f;
-        bool valid = false;
+        float AngleFade = 1.0f;
+        bool Valid = false;
     };
 
-    struct CStreakHistory
+    struct StreakHistory
     {
-        CStreakSample aSamples[HEADLIGHT_STREAK_HISTORY];
-        unsigned int lastUpdatedFrame = 0xFFFFFFFFu;
-        unsigned int lastSeenFrame = 0;
-        int sampleCount = 0;
-        bool active = false;
-        bool isRear = false;
-        bool isReverse = false;
-        float sizeScale = 1.0f;
+        StreakSample Samples[HEADLIGHT_STREAK_HISTORY];
+        unsigned int LastUpdatedFrame = 0xFFFFFFFFu;
+        unsigned int LastSeenFrame = 0;
+        int SampleCount = 0;
+        bool Active = false;
+        bool IsRear = false;
+        bool IsReverse = false;
+        float SizeScale = 1.0f;
     };
 
-    std::unordered_map<unsigned int, CStreakHistory> StreakHistoryById;
+    std::unordered_map<unsigned int, StreakHistory> s_StreakHistoryById;
 
-    bool ProjectLightToScreen(const CVector& worldPos, CStreakSample& sample,
+    bool ProjectLightToScreen(const CVector& worldPosition, StreakSample& sample,
                              const HeadlightColour& colour, float intensity,
                              float angleFade)
     {
-        const RwV3d position = { worldPos.x, worldPos.y, worldPos.z };
+        const RwV3d position = { worldPosition.x, worldPosition.y, worldPosition.z };
         RwV3d screenPosition{};
         float projectedWidth = 0.0f;
         float projectedHeight = 0.0f;
@@ -184,72 +387,72 @@ namespace
 
         // Clamp the custom streak to a shorter range and fade it before the cutoff.
         // screenPosition.z is the projected camera-space depth used by the sprite API.
-        if (screenPosition.z <= 0.5f || screenPosition.z >= fStreakDistanceFadeEnd)
+        if (screenPosition.z <= 0.5f || screenPosition.z >= s_StreakDistanceFadeEnd)
             return false;
 
-        sample.x = screenPosition.x;
-        sample.y = screenPosition.y;
-        sample.z = screenPosition.z;
-        sample.recipZ = 1.0f / screenPosition.z;
+        sample.ScreenX = screenPosition.x;
+        sample.ScreenY = screenPosition.y;
+        sample.Depth = screenPosition.z;
+        sample.ReciprocalDepth = 1.0f / screenPosition.z;
         // Keep colour separate from intensity. Applying intensity to both RGB
         // and alpha would square the fade and make the transition look abrupt.
-        sample.red = colour.red;
-        sample.green = colour.green;
-        sample.blue = colour.blue;
+        sample.Red = colour.Red;
+        sample.Green = colour.Green;
+        sample.Blue = colour.Blue;
         const float distanceFade = 1.0f - SmootherStep(
-            fStreakDistanceFadeStart, fStreakDistanceFadeEnd, screenPosition.z);
-        sample.intensity = Clamp01(intensity) * distanceFade;
-        sample.angleFade = Clamp01(angleFade);
-        sample.valid = sample.recipZ > 0.0f && sample.intensity > 0.001f;
-        return sample.valid;
+            s_StreakDistanceFadeStart, s_StreakDistanceFadeEnd, screenPosition.z);
+        sample.Intensity = Clamp01(intensity) * distanceFade;
+        sample.AngleFade = Clamp01(angleFade);
+        sample.Valid = sample.ReciprocalDepth > 0.0f && sample.Intensity > 0.001f;
+        return sample.Valid;
     }
 
-    void UpdateStreakHistory(unsigned int coronaId, const CVector& worldPos,
+    void UpdateStreakHistory(unsigned int coronaId, const CVector& worldPosition,
                              const HeadlightColour& colour, float intensity,
                              bool isRear, float angleFade,
                              float sizeScale, bool isReverse)
     {
-        if (!bCustomStreakEnabled)
+        if (!s_CustomStreakEnabled)
             return;
 
-        CStreakHistory& history = StreakHistoryById[coronaId];
-        history.isRear = isRear;
-        history.isReverse = isReverse;
-        history.sizeScale = std::max(0.1f, std::min(1.0f, sizeScale));
+        StreakHistory& history = s_StreakHistoryById[coronaId];
+        history.IsRear = isRear;
+        history.IsReverse = isReverse;
+        history.SizeScale = std::max(0.1f, std::min(1.0f, sizeScale));
         const unsigned int frame = CTimer::m_FrameCounter;
-        CStreakSample current;
+        StreakSample current;
 
-        history.lastSeenFrame = frame;
-        history.active = true;
+        history.LastSeenFrame = frame;
+        history.Active = true;
 
-        if (!ProjectLightToScreen(worldPos, current, colour, intensity, angleFade))
+        if (!ProjectLightToScreen(worldPosition, current, colour, intensity, angleFade))
         {
-            history.active = false;
-            history.sampleCount = 0;
+            history.Active = false;
+            history.SampleCount = 0;
             return;
         }
 
-        if (history.lastUpdatedFrame != frame)
+        if (history.LastUpdatedFrame != frame)
         {
             for (int i = HEADLIGHT_STREAK_HISTORY - 1; i > 0; --i)
-                history.aSamples[i] = history.aSamples[i - 1];
+                history.Samples[i] = history.Samples[i - 1];
 
-            if (history.sampleCount < HEADLIGHT_STREAK_HISTORY)
-                ++history.sampleCount;
+            if (history.SampleCount < HEADLIGHT_STREAK_HISTORY)
+                ++history.SampleCount;
 
-            history.lastUpdatedFrame = frame;
+            history.LastUpdatedFrame = frame;
         }
 
-        history.aSamples[0] = current;
+        history.Samples[0] = current;
     }
 
     void ClearStreakHistory(unsigned int coronaId)
     {
-        auto it = StreakHistoryById.find(coronaId);
-        if (it != StreakHistoryById.end())
+        auto it = s_StreakHistoryById.find(coronaId);
+        if (it != s_StreakHistoryById.end())
         {
-            it->second.active = false;
-            it->second.sampleCount = 0;
+            it->second.Active = false;
+            it->second.SampleCount = 0;
         }
     }
 
@@ -257,22 +460,22 @@ namespace
     // stock streak raster is still used, but every history sample is emitted as
     // a visible screen-space flare. This mirrors re3's per-corona history while
     // avoiding buffer state/order problems in a Plugin-SDK drawing callback.
-    void RenderStreakSprite(const CStreakSample& sample, float halfWidth,
+    void RenderStreakSprite(const StreakSample& sample, float halfWidth,
                             float halfHeight, unsigned char red,
                             unsigned char green, unsigned char blue,
                             short intensity)
     {
-        if (!sample.valid || sample.recipZ <= 0.0f || intensity <= 0)
+        if (!sample.Valid || sample.ReciprocalDepth <= 0.0f || intensity <= 0)
             return;
 
         // SA's sprite implementation scales RGB by the short intensity value;
         // the byte after rhw is vertex alpha. Keep vertex alpha fully enabled
         // for additive blending, fade RGB through intensity, and use default UVs.
         CSprite::RenderOneXLUSprite(
-            sample.x, sample.y, sample.z,
+            sample.ScreenX, sample.ScreenY, sample.Depth,
             halfWidth, halfHeight,
             red, green, blue,
-            intensity, sample.recipZ,
+            intensity, sample.ReciprocalDepth,
             255, 0, 0
         );
     }
@@ -280,9 +483,9 @@ namespace
     void RenderStreaks()
     {
         const unsigned int frame = CTimer::m_FrameCounter;
-        if (!bCustomStreakEnabled)
+        if (!s_CustomStreakEnabled)
         {
-            StreakHistoryById.clear();
+            s_StreakHistoryById.clear();
             return;
         }
         if (!gpCoronaTexture)
@@ -314,33 +517,33 @@ namespace
 
         RwRenderStateSet(rwRENDERSTATETEXTURERASTER, streakRaster);
         RwRenderStateSet(rwRENDERSTATESRCBLEND,
-                         reinterpret_cast<void*>(static_cast<uintptr_t>(rwBLENDSRCALPHA)));
+                         reinterpret_cast<void*>(static_cast<std::uintptr_t>(rwBLENDSRCALPHA)));
         RwRenderStateSet(rwRENDERSTATEDESTBLEND,
-                         reinterpret_cast<void*>(static_cast<uintptr_t>(rwBLENDONE)));
+                         reinterpret_cast<void*>(static_cast<std::uintptr_t>(rwBLENDONE)));
         RwRenderStateSet(rwRENDERSTATEVERTEXALPHAENABLE,
-                         reinterpret_cast<void*>(static_cast<uintptr_t>(TRUE)));
+                         reinterpret_cast<void*>(static_cast<std::uintptr_t>(TRUE)));
         RwRenderStateSet(rwRENDERSTATEZWRITEENABLE,
-                         reinterpret_cast<void*>(static_cast<uintptr_t>(FALSE)));
+                         reinterpret_cast<void*>(static_cast<std::uintptr_t>(FALSE)));
         RwRenderStateSet(rwRENDERSTATEZTESTENABLE,
-                         reinterpret_cast<void*>(static_cast<uintptr_t>(TRUE)));
+                         reinterpret_cast<void*>(static_cast<std::uintptr_t>(TRUE)));
 
-        for (auto it = StreakHistoryById.begin(); it != StreakHistoryById.end(); )
+        for (auto it = s_StreakHistoryById.begin(); it != s_StreakHistoryById.end(); )
         {
-            CStreakHistory& history = it->second;
-            if (frame - history.lastSeenFrame > 1u)
+            StreakHistory& history = it->second;
+            if (frame - history.LastSeenFrame > 1u)
             {
-                it = StreakHistoryById.erase(it);
+                it = s_StreakHistoryById.erase(it);
                 continue;
             }
 
-            if (!history.active || history.sampleCount < 1 || !history.aSamples[0].valid)
+            if (!history.Active || history.SampleCount < 1 || !history.Samples[0].Valid)
             {
                 ++it;
                 continue;
             }
 
-            const CStreakSample& current = history.aSamples[0];
-            const float currentIntensity = Clamp01(current.intensity);
+            const StreakSample& current = history.Samples[0];
+            const float currentIntensity = Clamp01(current.Intensity);
             if (currentIntensity <= 0.001f)
             {
                 ++it;
@@ -349,25 +552,25 @@ namespace
 
             // Draw one main sprite; repeated full-size samples would over-brighten
             // a stationary lamp under additive blending.
-            const float baseHalfWidth = history.isRear
+            const float baseHalfWidth = history.IsRear
                 ? REAR_STREAK_BASE_HALF_WIDTH : HEADLIGHT_STREAK_BASE_HALF_WIDTH;
-            const float maxHalfWidth = history.isRear
+            const float maxHalfWidth = history.IsRear
                 ? REAR_STREAK_MAX_HALF_WIDTH : HEADLIGHT_STREAK_MAX_HALF_WIDTH;
-            const float streakLengthScale = !history.isRear
-                ? fFrontStreakLengthScale
-                : (history.isReverse ? fReverseStreakLengthScale : fRearStreakLengthScale);
-            const float streakHeightScale = history.isRear
-                ? fRearStreakHeightScale : fFrontStreakHeightScale;
-            const float halfHeight = (history.isRear
+            const float streakLengthScale = !history.IsRear
+                ? s_FrontStreakLengthScale
+                : (history.IsReverse ? s_ReverseStreakLengthScale : s_RearStreakLengthScale);
+            const float streakHeightScale = history.IsRear
+                ? s_RearStreakHeightScale : s_FrontStreakHeightScale;
+            const float halfHeight = (history.IsRear
                 ? REAR_STREAK_HALF_HEIGHT : HEADLIGHT_STREAK_HALF_HEIGHT) *
-                history.sizeScale * streakHeightScale;
+                history.SizeScale * streakHeightScale;
             const float rawHalfWidth = (baseHalfWidth +
                 (maxHalfWidth - baseHalfWidth) * currentIntensity) *
-                history.sizeScale * streakLengthScale;
+                history.SizeScale * streakLengthScale;
             // Angle controls streak length independently of brightness. A quartic
             // taper removes the minimum-width floor near a broadside view.
-            const float angleFacing = Clamp01(current.angleFade);
-            const float angleWidthScale = std::pow(angleFacing, fSideAngleExponent);
+            const float angleFacing = Clamp01(current.AngleFade);
+            const float angleWidthScale = std::pow(angleFacing, s_SideAngleExponent);
             // Reduce thickness slightly as the streak shortens.
             const float angleHeightScale = 0.65f + 0.35f * angleFacing;
             // Intensity affects width modestly; alpha controls brightness.
@@ -380,21 +583,21 @@ namespace
                 ++it;
                 continue;
             }
-            const float baseAlpha = history.isRear
+            const float baseAlpha = history.IsRear
                 ? REAR_STREAK_BASE_ALPHA : HEADLIGHT_STREAK_BASE_ALPHA;
-            const float streakBrightness = !history.isRear
-                ? fFrontStreakBrightness
-                : (history.isReverse ? fReverseStreakBrightness : fRearStreakBrightness);
+            const float streakBrightness = !history.IsRear
+                ? s_FrontStreakBrightness
+                : (history.IsReverse ? s_ReverseStreakBrightness : s_RearStreakBrightness);
             const short mainAlpha = static_cast<short>(std::min(
                 255.0f, baseAlpha * currentIntensity * streakBrightness));
             RenderStreakSprite(current, mainHalfWidth, mainHalfHeight,
-                               current.red, current.green, current.blue, mainAlpha);
+                               current.Red, current.Green, current.Blue, mainAlpha);
 
             // Add faint history echoes only while the lamp moves on-screen.
             int oldestValidIndex = -1;
-            for (int i = history.sampleCount - 1; i >= 1; --i)
+            for (int i = history.SampleCount - 1; i >= 1; --i)
             {
-                if (history.aSamples[i].valid)
+                if (history.Samples[i].Valid)
                 {
                     oldestValidIndex = i;
                     break;
@@ -403,30 +606,31 @@ namespace
 
             if (oldestValidIndex >= 1)
             {
-                const CStreakSample& oldest = history.aSamples[oldestValidIndex];
-                const float dx = current.x - oldest.x;
-                const float dy = current.y - oldest.y;
+                const StreakSample& oldest = history.Samples[oldestValidIndex];
+                const float dx = current.ScreenX - oldest.ScreenX;
+                const float dy = current.ScreenY - oldest.ScreenY;
                 const float motionSquared = dx * dx + dy * dy;
 
                 if (motionSquared > 9.0f && currentIntensity > 0.12f &&
-                    current.angleFade > 0.18f && widthFade > 0.08f)
+                    current.AngleFade > 0.18f && widthFade > 0.08f)
                 {
                     const int echoCount = std::min(4, oldestValidIndex);
                     for (int echo = 1; echo <= echoCount; ++echo)
                     {
                         const float t = static_cast<float>(echo) / (echoCount + 1.0f);
-                        CStreakSample interpolated = current;
-                        interpolated.x = current.x + (oldest.x - current.x) * t;
-                        interpolated.y = current.y + (oldest.y - current.y) * t;
-                        interpolated.z = current.z + (oldest.z - current.z) * t;
-                        interpolated.recipZ = current.recipZ + (oldest.recipZ - current.recipZ) * t;
-                        const float echoBaseAlpha = history.isRear ? 20.0f : 24.0f;
+                        StreakSample interpolated = current;
+                        interpolated.ScreenX = current.ScreenX + (oldest.ScreenX - current.ScreenX) * t;
+                        interpolated.ScreenY = current.ScreenY + (oldest.ScreenY - current.ScreenY) * t;
+                        interpolated.Depth = current.Depth + (oldest.Depth - current.Depth) * t;
+                        interpolated.ReciprocalDepth = current.ReciprocalDepth +
+                            (oldest.ReciprocalDepth - current.ReciprocalDepth) * t;
+                        const float echoBaseAlpha = history.IsRear ? 20.0f : 24.0f;
                         const short echoAlpha = static_cast<short>(std::min(
                             255.0f, echoBaseAlpha * currentIntensity * streakBrightness * (1.0f - t)));
                         RenderStreakSprite(interpolated,
                             std::max(1.0f, mainHalfWidth * 0.18f),
-                            (history.isRear ? 3.6f : 4.4f) * angleWidthScale * angleHeightScale * history.sizeScale,
-                            interpolated.red, interpolated.green, interpolated.blue,
+                            (history.IsRear ? 3.6f : 4.4f) * angleWidthScale * angleHeightScale * history.SizeScale,
+                            interpolated.Red, interpolated.Green, interpolated.Blue,
                             echoAlpha);
                     }
                 }
@@ -468,22 +672,22 @@ namespace
     }
 
     void GetVehicleLightPositions(CVehicle* vehicle, CVehicleModelInfo* modelInfo,
-                                  int dummyIndex, CVector& lightPos,
-                                  CVector& lightL, CVector& lightR)
+                                  int dummyIndex, CVector& localLightPosition,
+                                  CVector& leftLightPosition, CVector& rightLightPosition)
     {
         if (modelInfo && modelInfo->m_pVehicleStruct)
         {
             const CVector dummyPos = modelInfo->m_pVehicleStruct->m_avDummyPos[dummyIndex];
             if (IsPositionSet(dummyPos))
-                lightPos = dummyPos;
+                localLightPosition = dummyPos;
         }
 
-        const CVector lightPosR = MirrorHeadlightPosition(lightPos);
-        lightL = TransformLocalPosition(vehicle, lightPos);
-        lightR = TransformLocalPosition(vehicle, lightPosR);
+        const CVector mirroredLightPosition = MirrorHeadlightPosition(localLightPosition);
+        leftLightPosition = TransformLocalPosition(vehicle, localLightPosition);
+        rightLightPosition = TransformLocalPosition(vehicle, mirroredLightPosition);
     }
 
-    float GetCameraBehindness(const CVehicle* vehicle, float& camDist)
+    float GetCameraBehindness(const CVehicle* vehicle, float& cameraDistance)
     {
         const CVector& cameraPos = TheCamera.m_mCameraMatrix.pos;
         const CVector& vehiclePos = vehicle->m_matrix->pos;
@@ -494,15 +698,15 @@ namespace
             vehiclePos.z - cameraPos.z
         );
 
-        camDist = std::sqrt(
+        cameraDistance = std::sqrt(
             lookVector.x * lookVector.x +
             lookVector.y * lookVector.y +
             lookVector.z * lookVector.z
         );
 
-        if (camDist > 0.0001f)
+        if (cameraDistance > 0.0001f)
         {
-            const float inverseDistance = 1.0f / camDist;
+            const float inverseDistance = 1.0f / cameraDistance;
             lookVector.x *= inverseDistance;
             lookVector.y *= inverseDistance;
             lookVector.z *= inverseDistance;
@@ -513,17 +717,17 @@ namespace
         }
 
         const CVector& forward = vehicle->m_matrix->up;
-        float behindness = lookVector.x * forward.x +
+        float cameraBehindness = lookVector.x * forward.x +
                            lookVector.y * forward.y +
                            lookVector.z * forward.z;
 
         // Clamp floating-point drift before calculating the camera angle.
-        if (behindness < -1.0f)
-            behindness = -1.0f;
-        else if (behindness > 1.0f)
-            behindness = 1.0f;
+        if (cameraBehindness < -1.0f)
+            cameraBehindness = -1.0f;
+        else if (cameraBehindness > 1.0f)
+            cameraBehindness = 1.0f;
 
-        return behindness;
+        return cameraBehindness;
     }
 
     HeadlightColour GetHeadlightColour(const CVehicle* vehicle)
@@ -539,47 +743,47 @@ namespace
     void RegisterLightCorona(unsigned int coronaId, const CVector& position,
                              const HeadlightColour& colour, unsigned char alpha,
                              float size, float farClip, eCoronaType coronaType,
-                             float angle)
+                             float coronaAngle)
     {
         CCoronas::RegisterCorona(
             coronaId, nullptr,
-            colour.red, colour.green, colour.blue, alpha,
+            colour.Red, colour.Green, colour.Blue, alpha,
             position, size, farClip, coronaType, FLARETYPE_NONE,
-            true, false, 0, angle, false,
+            true, false, 0, coronaAngle, false,
             HEADLIGHT_NEAR_CLIP, 0, HEADLIGHT_FADE_SPEED, false, false
         );
     }
 
     void RegisterHeadlightCore(unsigned int coronaId, const CVector& position,
-                               const HeadlightColour& colour, float size, float angle,
+                               const HeadlightColour& colour, float size, float coronaAngle,
                                float fade)
     {
-        const float scaledAlpha = 255.0f * Clamp01(fade) * Clamp01(fFrontCoreBrightness);
+        const float scaledAlpha = 255.0f * Clamp01(fade) * Clamp01(s_FrontCoreBrightness);
         const unsigned char alpha = static_cast<unsigned char>(scaledAlpha);
         RegisterLightCorona(coronaId, position, colour, alpha,
-                            size * fFrontCoreSizeScale,
-                            HEADLIGHT_CORE_FAR_CLIP, CORONATYPE_HEADLIGHT, angle);
+                            size * s_FrontCoreSizeScale,
+                            HEADLIGHT_CORE_FAR_CLIP, CORONATYPE_HEADLIGHT, coronaAngle);
     }
 
-    void HideHeadlightCore(unsigned int coronaId, const CVector& worldPos, float angle)
+    void HideHeadlightCore(unsigned int coronaId, const CVector& worldPosition, float coronaAngle)
     {
         // Re-register the same ID with zero alpha so the previous corona is
         // replaced immediately instead of lingering as a fading old instance.
-        RegisterHeadlightCore(coronaId, worldPos, { 0, 0, 0 }, 1.2f, angle, 0);
+        RegisterHeadlightCore(coronaId, worldPosition, { 0, 0, 0 }, 1.2f, coronaAngle, 0);
     }
 
     void RegisterReverseLightCore(unsigned int coronaId, const CVector& position,
-                                  float angle, float fade, float sizeScale,
-                                  float brightnessScale)
+                                  float coronaAngle, float fade, float sizeScale,
+                                  float brightnessMultiplier)
     {
         const float scaledAlpha = std::min(
             255.0f, 190.0f * Clamp01(fade) *
-                std::max(0.0f, fReverseCoreBrightness) * Clamp01(brightnessScale));
+                std::max(0.0f, s_ReverseCoreBrightness) * Clamp01(brightnessMultiplier));
         RegisterLightCorona(coronaId, position, { 200, 215, 235 },
                             static_cast<unsigned char>(scaledAlpha),
                             0.9f * REVERSE_LIGHT_CORE_SIZE_MULTIPLIER *
-                                sizeScale * fReverseCoreSizeScale,
-                            REVERSE_LIGHT_FAR_CLIP, CORONATYPE_HEADLIGHT, angle);
+                                sizeScale * s_ReverseCoreSizeScale,
+                            REVERSE_LIGHT_FAR_CLIP, CORONATYPE_HEADLIGHT, coronaAngle);
     }
 
     bool IsVehicleReversing(const CVehicle* vehicle)
@@ -597,110 +801,110 @@ namespace
         return vehicle->m_fGasPedal < -0.05f || forwardSpeed < -0.01f;
     }
 
-    void ProcessReverseLights(bool reversing, bool isMotorcycle,
-                              float reverseBrightnessScale,
-                              float behindness, float coreDistanceFade,
-                              unsigned int baseId, float angle,
-                              const CVector& lightL, const CVector& lightR)
+    void ProcessReverseLights(bool isReversing, bool isBike,
+                              float reverseBrightnessMultiplier,
+                              float cameraBehindness, float coreDistanceFade,
+                              unsigned int baseCoronaId, float coronaAngle,
+                              const CVector& leftLightPosition, const CVector& rightLightPosition)
     {
         // Reverse cores use a narrow angle and distance envelope.
         const float coreAngleFade = SmootherStep(
-            fReverseCoreAngleFadeStart, fReverseCoreAngleFadeEnd, behindness);
-        const float coreFade = reversing ? coreAngleFade * coreDistanceFade : 0.0f;
+            s_ReverseCoreAngleFadeStart, s_ReverseCoreAngleFadeEnd, cameraBehindness);
+        const float coreFade = isReversing ? coreAngleFade * coreDistanceFade : 0.0f;
 
-        const float coreSizeScale = isMotorcycle
-            ? fBikeReverseCoreSizeMult : 1.0f;
-        RegisterReverseLightCore(baseId + 0x79u, lightL, angle, coreFade, coreSizeScale,
-                                reverseBrightnessScale);
-        RegisterReverseLightCore(baseId + 0x7Au, lightR, angle, coreFade, coreSizeScale,
-                                reverseBrightnessScale);
+        const float coreSizeScale = isBike
+            ? s_BikeReverseCoreSizeMultiplier : 1.0f;
+        RegisterReverseLightCore(baseCoronaId + 0x79u, leftLightPosition, coronaAngle, coreFade, coreSizeScale,
+                                reverseBrightnessMultiplier);
+        RegisterReverseLightCore(baseCoronaId + 0x7Au, rightLightPosition, coronaAngle, coreFade, coreSizeScale,
+                                reverseBrightnessMultiplier);
     }
 
     void RegisterRearLampCore(unsigned int coronaId, const CVector& position,
-                              const HeadlightColour& colour, float angle, float fade,
+                              const HeadlightColour& colour, float coronaAngle, float fade,
                               float sizeScale, bool isReverse,
-                              float reverseBrightnessScale)
+                              float reverseBrightnessMultiplier)
     {
         // The round side-view replacement is intentionally smaller than the
         // main rear-view streak, so it reads as a compact lamp instead of a halo.
         const float maxAlpha = isReverse ? 78.0f : 95.0f;
         const float brightness = isReverse
-            ? fReverseCoreBrightness * Clamp01(reverseBrightnessScale)
-            : fRearRoundCoreBrightness;
+            ? s_ReverseCoreBrightness * Clamp01(reverseBrightnessMultiplier)
+            : s_RearRoundCoreBrightness;
         const float coreSizeScale = isReverse
-            ? fReverseCoreSizeScale : fRearRoundCoreSizeScale;
+            ? s_ReverseCoreSizeScale : s_RearRoundCoreSizeScale;
         const float scaledAlpha = std::min(
             255.0f, maxAlpha * Clamp01(fade) * std::max(0.0f, brightness));
         RegisterLightCorona(coronaId, position, colour,
                             static_cast<unsigned char>(scaledAlpha),
                             0.30f * sizeScale * coreSizeScale,
-                            HEADLIGHT_CORE_FAR_CLIP, CORONATYPE_HEADLIGHT, angle);
+                            HEADLIGHT_CORE_FAR_CLIP, CORONATYPE_HEADLIGHT, coronaAngle);
     }
 
-    void ProcessRearLights(CVehicle* vehicle, bool reversing, bool isMotorcycle,
-                          float reverseBrightnessScale, float behindness,
-                          float camDist, unsigned int baseId, float angle,
-                          const CVector& lightL, const CVector& lightR)
+    void ProcessRearLights(CVehicle* vehicle, bool isReversing, bool isBike,
+                          float reverseBrightnessMultiplier, float cameraBehindness,
+                          float cameraDistance, unsigned int baseCoronaId, float coronaAngle,
+                          const CVector& leftLightPosition, const CVector& rightLightPosition)
     {
-        const unsigned int leftStreakId = baseId + 0x7Du;
-        const unsigned int rightStreakId = baseId + 0x7Eu;
+        const unsigned int leftStreakId = baseCoronaId + 0x7Du;
+        const unsigned int rightStreakId = baseCoronaId + 0x7Eu;
         const float rearVisibilityFade = SmootherStep(
-            -fFrontAngleFadeEnd, -fFrontAngleFadeStart, behindness);
+            -s_FrontAngleFadeEnd, -s_FrontAngleFadeStart, cameraBehindness);
         // Fade and shorten the streak as the camera moves behind the vehicle;
         // the compact side-view corona prevents the line crossing the body.
         const float rearVisibility = rearVisibilityFade * rearVisibilityFade;
 
-        const bool effectEnabled = vehicle->bLightsOn || reversing;
-        const float normalIntensity = Clamp01(0.38f + 0.30f * behindness);
+        const bool rearLightsEnabled = vehicle->bLightsOn || isReversing;
+        const float normalIntensity = Clamp01(0.38f + 0.30f * cameraBehindness);
 
         // The streak and side-view corona share the same colour transition.
-        const HeadlightColour streakColour = reversing
+        const HeadlightColour streakColour = isReversing
             ? HeadlightColour{ 205, 220, 250 }
             : HeadlightColour{ 255, 24, 12 };
-        const float streakBrightness = reversing
-            ? 0.60f * Clamp01(reverseBrightnessScale) : normalIntensity;
+        const float streakBrightness = isReversing
+            ? 0.60f * Clamp01(reverseBrightnessMultiplier) : normalIntensity;
         // Fade only the normal red taillight streak in with distance. Near the
         // camera the stock red tail lamps remain, but the custom long red line is
         // hidden; it then grows smoothly instead of popping in at one distance.
         const float redTailDistanceFade = SmootherStep(
-            fRearTailDistanceFadeStart, fRearTailDistanceFadeEnd,
-            camDist);
-        const float distanceFade = reversing ? 1.0f : redTailDistanceFade;
+            s_RearTailDistanceFadeStart, s_RearTailDistanceFadeEnd,
+            cameraDistance);
+        const float distanceFade = isReversing ? 1.0f : redTailDistanceFade;
         const float intensity = streakBrightness * rearVisibility * distanceFade;
 
         // Cross-fade the compact side-view corona into the rear streak.
         const float roundEntryFade = SmootherStep(
-            fRearRoundAngleEntryStart, fRearRoundAngleEntryEnd, behindness);
+            s_RearRoundAngleEntryStart, s_RearRoundAngleEntryEnd, cameraBehindness);
         const float roundExitFade = 1.0f - SmootherStep(
-            fRearRoundAngleExitStart, fRearRoundAngleExitEnd, behindness);
-        const float roundFade = effectEnabled
+            s_RearRoundAngleExitStart, s_RearRoundAngleExitEnd, cameraBehindness);
+        const float roundFade = rearLightsEnabled
             ? roundEntryFade * roundExitFade
             : 0.0f;
-        const float reverseLampSizeScale = reversing && isMotorcycle
-            ? fBikeReverseCoreSizeMult : 1.0f;
-        RegisterRearLampCore(baseId + 0x81u, lightL, streakColour, angle,
-                             roundFade, reverseLampSizeScale, reversing,
-                             reverseBrightnessScale);
-        RegisterRearLampCore(baseId + 0x82u, lightR, streakColour, angle,
-                             roundFade, reverseLampSizeScale, reversing,
-                             reverseBrightnessScale);
+        const float reverseLampSizeScale = isReversing && isBike
+            ? s_BikeReverseCoreSizeMultiplier : 1.0f;
+        RegisterRearLampCore(baseCoronaId + 0x81u, leftLightPosition, streakColour, coronaAngle,
+                             roundFade, reverseLampSizeScale, isReversing,
+                             reverseBrightnessMultiplier);
+        RegisterRearLampCore(baseCoronaId + 0x82u, rightLightPosition, streakColour, coronaAngle,
+                             roundFade, reverseLampSizeScale, isReversing,
+                             reverseBrightnessMultiplier);
 
         // Do not register another long native corona for ordinary tail lamps.
         // The stock lamps remain intact; the custom layer draws the elongated line
         // from the rear view and the small circular replacement near side angles.
-        if (!effectEnabled || rearVisibility <= 0.001f)
+        if (!rearLightsEnabled || rearVisibility <= 0.001f)
         {
             ClearStreakHistory(leftStreakId);
             ClearStreakHistory(rightStreakId);
             return;
         }
 
-        const float streakSizeScale = reversing && isMotorcycle
-            ? fBikeReverseStreakSizeMult : 1.0f;
-        UpdateStreakHistory(leftStreakId, lightL, streakColour, intensity,
-                              true, rearVisibilityFade, streakSizeScale, reversing);
-        UpdateStreakHistory(rightStreakId, lightR, streakColour, intensity,
-                              true, rearVisibilityFade, streakSizeScale, reversing);
+        const float streakSizeScale = isReversing && isBike
+            ? s_BikeReverseStreakSizeMultiplier : 1.0f;
+        UpdateStreakHistory(leftStreakId, leftLightPosition, streakColour, intensity,
+                              true, rearVisibilityFade, streakSizeScale, isReversing);
+        UpdateStreakHistory(rightStreakId, rightLightPosition, streakColour, intensity,
+                              true, rearVisibilityFade, streakSizeScale, isReversing);
     }
 
     // The stock damage manager is available on CAutomobile-derived road cars.
@@ -731,42 +935,42 @@ namespace
         bool rightLightWorking = true;
         GetHeadlightWorkingState(vehicle, modelInfo, leftLightWorking, rightLightWorking);
 
-        CVector lightPos(DEFAULT_HEADLIGHT_X, DEFAULT_HEADLIGHT_Y, DEFAULT_HEADLIGHT_Z);
-        CVector lightL, lightR;
+        CVector localLightPosition(DEFAULT_HEADLIGHT_X, DEFAULT_HEADLIGHT_Y, DEFAULT_HEADLIGHT_Z);
+        CVector leftLightPosition, rightLightPosition;
         GetVehicleLightPositions(vehicle, modelInfo, DUMMY_HEADLIGHTS,
-                                 lightPos, lightL, lightR);
+                                 localLightPosition, leftLightPosition, rightLightPosition);
 
-        float camDist = 0.0f;
-        const float behindness = GetCameraBehindness(vehicle, camDist);
+        float cameraDistance = 0.0f;
+        const float cameraBehindness = GetCameraBehindness(vehicle, cameraDistance);
         const float coreDistanceFade = 1.0f - SmootherStep(
-            fFrontCoreDistanceFadeStart, fFrontCoreDistanceFadeEnd, camDist);
-        const unsigned int baseId = static_cast<unsigned int>(
+            s_FrontCoreDistanceFadeStart, s_FrontCoreDistanceFadeEnd, cameraDistance);
+        const unsigned int baseCoronaId = static_cast<unsigned int>(
             reinterpret_cast<std::uintptr_t>(vehicle));
-        const float angle = std::acos(behindness);
+        const float coronaAngle = std::acos(cameraBehindness);
         const HeadlightColour colour = GetHeadlightColour(vehicle);
-        const bool reversing = IsVehicleReversing(vehicle);
-        const bool isMotorcycle = modelInfo && modelInfo->m_nVehicleType == VEHICLE_BIKE;
-        const bool isQuadbike = vehicle->m_nModelIndex == QUADBIKE_MODEL_ID;
-        const float reverseBrightnessScale = (isMotorcycle || isQuadbike)
-            ? Clamp01(fBikeReverseBrightnessMult) : 1.0f;
+        const bool isReversing = IsVehicleReversing(vehicle);
+        const bool isBike = modelInfo && modelInfo->m_nVehicleType == VEHICLE_BIKE;
+        const bool isQuadBike = vehicle->m_nModelIndex == QUADBIKE_MODEL_ID;
+        const float reverseBrightnessMultiplier = (isBike || isQuadBike)
+            ? Clamp01(s_BikeReverseBrightnessMultiplier) : 1.0f;
 
-        CVector localRearLeft(-DEFAULT_HEADLIGHT_X, DEFAULT_REAR_LIGHT_Y, DEFAULT_HEADLIGHT_Z);
-        CVector rearLightL, rearLightR;
+        CVector localRearLightPosition(-DEFAULT_HEADLIGHT_X, DEFAULT_REAR_LIGHT_Y, DEFAULT_HEADLIGHT_Z);
+        CVector rearLeftLightPosition, rearRightLightPosition;
         GetVehicleLightPositions(vehicle, modelInfo, DUMMY_REAR_LIGHTS,
-                                 localRearLeft, rearLightL, rearLightR);
+                                 localRearLightPosition, rearLeftLightPosition, rearRightLightPosition);
 
         if (vehicle->bLightsOn)
         {
             // Fade front streaks smoothly as the camera moves toward the side.
             const float frontVisibilityFade = 1.0f - SmootherStep(
-                fFrontAngleFadeStart, fFrontAngleFadeEnd, behindness);
+                s_FrontAngleFadeStart, s_FrontAngleFadeEnd, cameraBehindness);
             // The extra fade limits screen-space lines crossing the body.
             const float frontVisibility = frontVisibilityFade * frontVisibilityFade;
-            const float rawIntensity = -0.5f * behindness + 0.3f;
+            const float rawIntensity = -0.5f * cameraBehindness + 0.3f;
             const float baseIntensity = Clamp01(rawIntensity);
             const float intensity = baseIntensity * frontVisibility;
             // Match damage state to the dummy side; models can store either side first.
-            const bool firstLampIsVehicleLeft = lightPos.x < 0.0f;
+            const bool firstLampIsVehicleLeft = localLightPosition.x < 0.0f;
             const bool firstLightWorking = firstLampIsVehicleLeft
                 ? leftLightWorking : rightLightWorking;
             const bool secondLightWorking = firstLampIsVehicleLeft
@@ -775,92 +979,98 @@ namespace
             // Keep the two physical lamps independent: a damaged lamp clears only
             // its own streak and core, not the one on the opposite side.
             if (firstLightWorking)
-                UpdateStreakHistory(baseId + 0x71u, lightL, colour, intensity,
+                UpdateStreakHistory(baseCoronaId + 0x71u, leftLightPosition, colour, intensity,
                                     false, frontVisibilityFade, 1.0f, false);
             else
-                ClearStreakHistory(baseId + 0x71u);
+                ClearStreakHistory(baseCoronaId + 0x71u);
 
             if (secondLightWorking)
-                UpdateStreakHistory(baseId + 0x72u, lightR, colour, intensity,
+                UpdateStreakHistory(baseCoronaId + 0x72u, rightLightPosition, colour, intensity,
                                     false, frontVisibilityFade, 1.0f, false);
             else
-                ClearStreakHistory(baseId + 0x72u);
+                ClearStreakHistory(baseCoronaId + 0x72u);
 
             // Keep the round core's angle and distance fades narrower than the streak.
             const float coreAngleFade = 1.0f - SmootherStep(
-                fFrontCoreAngleFadeStart, fFrontCoreAngleFadeEnd, behindness);
+                s_FrontCoreAngleFadeStart, s_FrontCoreAngleFadeEnd, cameraBehindness);
             const float coreFade = coreAngleFade * coreDistanceFade;
 
             if (firstLightWorking && coreFade > 0.001f)
-                RegisterHeadlightCore(baseId + 0x73u, lightL, colour, 1.2f, angle, coreFade);
+                RegisterHeadlightCore(baseCoronaId + 0x73u, leftLightPosition, colour, 1.2f, coronaAngle, coreFade);
             else
-                HideHeadlightCore(baseId + 0x73u, lightL, angle);
+                HideHeadlightCore(baseCoronaId + 0x73u, leftLightPosition, coronaAngle);
 
             if (secondLightWorking && coreFade > 0.001f)
-                RegisterHeadlightCore(baseId + 0x74u, lightR, colour, 1.2f, angle, coreFade);
+                RegisterHeadlightCore(baseCoronaId + 0x74u, rightLightPosition, colour, 1.2f, coronaAngle, coreFade);
             else
-                HideHeadlightCore(baseId + 0x74u, lightR, angle);
+                HideHeadlightCore(baseCoronaId + 0x74u, rightLightPosition, coronaAngle);
         }
         else
         {
-            ClearStreakHistory(baseId + 0x71u);
-            ClearStreakHistory(baseId + 0x72u);
-            HideHeadlightCore(baseId + 0x73u, lightL, angle);
-            HideHeadlightCore(baseId + 0x74u, lightR, angle);
+            ClearStreakHistory(baseCoronaId + 0x71u);
+            ClearStreakHistory(baseCoronaId + 0x72u);
+            HideHeadlightCore(baseCoronaId + 0x73u, leftLightPosition, coronaAngle);
+            HideHeadlightCore(baseCoronaId + 0x74u, rightLightPosition, coronaAngle);
         }
 
         // Keep stock rear lamps and add the custom screen-space layer.
-        ProcessRearLights(vehicle, reversing, isMotorcycle, reverseBrightnessScale,
-                          behindness, camDist, baseId, angle, rearLightL, rearLightR);
+        ProcessRearLights(vehicle, isReversing, isBike, reverseBrightnessMultiplier,
+                          cameraBehindness, cameraDistance, baseCoronaId, coronaAngle,
+                          rearLeftLightPosition, rearRightLightPosition);
 
         // Reverse lamps are independent of the headlight switch.
-        ProcessReverseLights(reversing, isMotorcycle, reverseBrightnessScale, behindness,
-                             coreDistanceFade, baseId, angle,
-                             rearLightL, rearLightR);
+        ProcessReverseLights(isReversing, isBike, reverseBrightnessMultiplier, cameraBehindness,
+                             coreDistanceFade, baseCoronaId, coronaAngle,
+                             rearLeftLightPosition, rearRightLightPosition);
     }
 
     void ResetStreakDebugSettings()
     {
-        bCustomStreakEnabled = 1;
-        fFrontStreakLengthScale = 1.0f;
-        fFrontStreakHeightScale = 1.0f;
-        fFrontStreakBrightness = 1.0f;
-        fFrontCoreSizeScale = 1.0f;
-        fFrontCoreBrightness = 0.65f;
-        fRearStreakLengthScale = 1.0f;
-        fRearStreakHeightScale = 1.0f;
-        fRearStreakBrightness = 1.0f;
-        fRearRoundCoreSizeScale = 1.0f;
-        fRearRoundCoreBrightness = 1.0f;
-        fReverseStreakLengthScale = 1.0f;
-        fReverseStreakBrightness = 1.0f;
-        fReverseCoreSizeScale = 1.0f;
-        fReverseCoreBrightness = 1.0f;
-        fBikeReverseStreakSizeMult = 0.55f;
-        fBikeReverseCoreSizeMult = 0.60f;
-        fBikeReverseBrightnessMult = 0.35f;
-        fSideAngleExponent = 4.0f;
-        fFrontAngleFadeStart = -0.88f;
-        fFrontAngleFadeEnd = -0.25f;
-        fFrontCoreAngleFadeStart = -0.995f;
-        fFrontCoreAngleFadeEnd = -0.88f;
-        fFrontCoreDistanceFadeStart = 23.0f;
-        fFrontCoreDistanceFadeEnd = 32.0f;
-        fReverseCoreAngleFadeStart = 0.80f;
-        fReverseCoreAngleFadeEnd = 0.97f;
-        fRearTailDistanceFadeStart = 9.0f;
-        fRearTailDistanceFadeEnd = 23.0f;
-        fStreakDistanceFadeStart = 25.0f;
-        fStreakDistanceFadeEnd = 40.0f;
-        fRearRoundAngleEntryStart = -0.20f;
-        fRearRoundAngleEntryEnd = 0.12f;
-        fRearRoundAngleExitStart = 0.28f;
-        fRearRoundAngleExitEnd = 0.78f;
+        s_CustomStreakEnabled = 1;
+        s_FrontStreakLengthScale = 1.0f;
+        s_FrontStreakHeightScale = 1.0f;
+        s_FrontStreakBrightness = 1.0f;
+        s_FrontCoreSizeScale = 1.0f;
+        s_FrontCoreBrightness = 0.65f;
+        s_RearStreakLengthScale = 1.0f;
+        s_RearStreakHeightScale = 1.0f;
+        s_RearStreakBrightness = 1.0f;
+        s_RearRoundCoreSizeScale = 1.0f;
+        s_RearRoundCoreBrightness = 1.0f;
+        s_ReverseStreakLengthScale = 1.0f;
+        s_ReverseStreakBrightness = 1.0f;
+        s_ReverseCoreSizeScale = 1.0f;
+        s_ReverseCoreBrightness = 1.0f;
+        s_BikeReverseStreakSizeMultiplier = 0.55f;
+        s_BikeReverseCoreSizeMultiplier = 0.60f;
+        s_BikeReverseBrightnessMultiplier = 0.35f;
+        s_SideAngleExponent = 4.0f;
+        s_FrontAngleFadeStart = -0.88f;
+        s_FrontAngleFadeEnd = -0.25f;
+        s_FrontCoreAngleFadeStart = -0.995f;
+        s_FrontCoreAngleFadeEnd = -0.88f;
+        s_FrontCoreDistanceFadeStart = 23.0f;
+        s_FrontCoreDistanceFadeEnd = 32.0f;
+        s_ReverseCoreAngleFadeStart = 0.80f;
+        s_ReverseCoreAngleFadeEnd = 0.97f;
+        s_RearTailDistanceFadeStart = 9.0f;
+        s_RearTailDistanceFadeEnd = 23.0f;
+        s_StreakDistanceFadeStart = 25.0f;
+        s_StreakDistanceFadeEnd = 40.0f;
+        s_RearRoundAngleEntryStart = -0.20f;
+        s_RearRoundAngleEntryEnd = 0.12f;
+        s_RearRoundAngleExitStart = 0.28f;
+        s_RearRoundAngleExitEnd = 0.78f;
+
+        // Treat the INI as user defaults; reset/reload restores them after the Debug Menu edits.
+        LoadPluginConfig();
     }
 
     void RegisterStreakDebugMenu()
     {
-        if (bDebugMenuRegistered || !DebugMenuLoad())
+        // Load config independently of whether the optional Debug Menu API is available.
+        LoadPluginConfig();
+        if (s_DebugMenuRegistered || !DebugMenuLoad())
             return;
 
         // The official API loader marks itself loaded even if an export is missing;
@@ -872,84 +1082,84 @@ namespace
         static const char* toggleStrings[] = { "Off", "On" };
         DebugMenuEntry* toggle = DebugMenuAddVar(
             "SA Streaks|General", "Custom streak lines",
-            &bCustomStreakEnabled, nullptr, 1, 0, 1, toggleStrings);
+            &s_CustomStreakEnabled, nullptr, 1, 0, 1, toggleStrings);
         if (toggle)
             DebugMenuEntrySetWrap(toggle, true);
-        DebugMenuAddCmd("SA Streaks|General", "Reset all values", ResetStreakDebugSettings);
+        DebugMenuAddCmd("SA Streaks|General", "Reload INI / reset values", ResetStreakDebugSettings);
 
-        DebugMenuAddVar("SA Streaks|Front", "Streak length", &fFrontStreakLengthScale,
+        DebugMenuAddVar("SA Streaks|Front", "Streak length", &s_FrontStreakLengthScale,
                         nullptr, 0.05f, 0.25f, 2.50f);
-        DebugMenuAddVar("SA Streaks|Front", "Streak height", &fFrontStreakHeightScale,
+        DebugMenuAddVar("SA Streaks|Front", "Streak height", &s_FrontStreakHeightScale,
                         nullptr, 0.05f, 0.50f, 2.00f);
-        DebugMenuAddVar("SA Streaks|Front", "Streak brightness", &fFrontStreakBrightness,
+        DebugMenuAddVar("SA Streaks|Front", "Streak brightness", &s_FrontStreakBrightness,
                         nullptr, 0.05f, 0.0f, 1.50f);
-        DebugMenuAddVar("SA Streaks|Front", "Round core size", &fFrontCoreSizeScale,
+        DebugMenuAddVar("SA Streaks|Front", "Round core size", &s_FrontCoreSizeScale,
                         nullptr, 0.05f, 0.40f, 1.80f);
-        DebugMenuAddVar("SA Streaks|Front", "Round core brightness", &fFrontCoreBrightness,
+        DebugMenuAddVar("SA Streaks|Front", "Round core brightness", &s_FrontCoreBrightness,
                         nullptr, 0.05f, 0.0f, 1.0f);
-        DebugMenuAddVar("SA Streaks|Front", "Angle fade start", &fFrontAngleFadeStart,
+        DebugMenuAddVar("SA Streaks|Front", "Angle fade start", &s_FrontAngleFadeStart,
                         nullptr, 0.02f, -0.99f, -0.30f);
-        DebugMenuAddVar("SA Streaks|Front", "Angle fade end", &fFrontAngleFadeEnd,
+        DebugMenuAddVar("SA Streaks|Front", "Angle fade end", &s_FrontAngleFadeEnd,
                         nullptr, 0.02f, -0.25f, 0.50f);
-        DebugMenuAddVar("SA Streaks|Front", "Core angle start", &fFrontCoreAngleFadeStart,
+        DebugMenuAddVar("SA Streaks|Front", "Core angle start", &s_FrontCoreAngleFadeStart,
                         nullptr, 0.005f, -1.0f, -0.905f);
-        DebugMenuAddVar("SA Streaks|Front", "Core angle end", &fFrontCoreAngleFadeEnd,
+        DebugMenuAddVar("SA Streaks|Front", "Core angle end", &s_FrontCoreAngleFadeEnd,
                         nullptr, 0.005f, -0.90f, -0.50f);
-        DebugMenuAddVar("SA Streaks|Front", "Core distance start", &fFrontCoreDistanceFadeStart,
+        DebugMenuAddVar("SA Streaks|Front", "Core distance start", &s_FrontCoreDistanceFadeStart,
                         nullptr, 1.0f, 5.0f, 30.0f);
-        DebugMenuAddVar("SA Streaks|Front", "Core distance end", &fFrontCoreDistanceFadeEnd,
+        DebugMenuAddVar("SA Streaks|Front", "Core distance end", &s_FrontCoreDistanceFadeEnd,
                         nullptr, 1.0f, 31.0f, 45.0f);
 
-        DebugMenuAddVar("SA Streaks|Rear", "Streak length", &fRearStreakLengthScale,
+        DebugMenuAddVar("SA Streaks|Rear", "Streak length", &s_RearStreakLengthScale,
                         nullptr, 0.05f, 0.25f, 2.50f);
-        DebugMenuAddVar("SA Streaks|Rear", "Streak height", &fRearStreakHeightScale,
+        DebugMenuAddVar("SA Streaks|Rear", "Streak height", &s_RearStreakHeightScale,
                         nullptr, 0.05f, 0.50f, 2.00f);
-        DebugMenuAddVar("SA Streaks|Rear", "Streak brightness", &fRearStreakBrightness,
+        DebugMenuAddVar("SA Streaks|Rear", "Streak brightness", &s_RearStreakBrightness,
                         nullptr, 0.05f, 0.0f, 1.50f);
-        DebugMenuAddVar("SA Streaks|Rear", "Side core size", &fRearRoundCoreSizeScale,
+        DebugMenuAddVar("SA Streaks|Rear", "Side core size", &s_RearRoundCoreSizeScale,
                         nullptr, 0.05f, 0.20f, 2.00f);
-        DebugMenuAddVar("SA Streaks|Rear", "Side core brightness", &fRearRoundCoreBrightness,
+        DebugMenuAddVar("SA Streaks|Rear", "Side core brightness", &s_RearRoundCoreBrightness,
                         nullptr, 0.05f, 0.0f, 1.0f);
-        DebugMenuAddVar("SA Streaks|Rear", "Distance fade start", &fRearTailDistanceFadeStart,
+        DebugMenuAddVar("SA Streaks|Rear", "Distance fade start", &s_RearTailDistanceFadeStart,
                         nullptr, 1.0f, 2.0f, 20.0f);
-        DebugMenuAddVar("SA Streaks|Rear", "Distance fade end", &fRearTailDistanceFadeEnd,
+        DebugMenuAddVar("SA Streaks|Rear", "Distance fade end", &s_RearTailDistanceFadeEnd,
                         nullptr, 1.0f, 21.0f, 35.0f);
-        DebugMenuAddVar("SA Streaks|Rear", "Round entry start", &fRearRoundAngleEntryStart,
+        DebugMenuAddVar("SA Streaks|Rear", "Round entry start", &s_RearRoundAngleEntryStart,
                         nullptr, 0.02f, -0.50f, 0.10f);
-        DebugMenuAddVar("SA Streaks|Rear", "Round entry end", &fRearRoundAngleEntryEnd,
+        DebugMenuAddVar("SA Streaks|Rear", "Round entry end", &s_RearRoundAngleEntryEnd,
                         nullptr, 0.01f, 0.11f, 0.19f);
-        DebugMenuAddVar("SA Streaks|Rear", "Round exit start", &fRearRoundAngleExitStart,
+        DebugMenuAddVar("SA Streaks|Rear", "Round exit start", &s_RearRoundAngleExitStart,
                         nullptr, 0.02f, 0.20f, 0.70f);
-        DebugMenuAddVar("SA Streaks|Rear", "Round exit end", &fRearRoundAngleExitEnd,
+        DebugMenuAddVar("SA Streaks|Rear", "Round exit end", &s_RearRoundAngleExitEnd,
                         nullptr, 0.02f, 0.71f, 0.99f);
 
-        DebugMenuAddVar("SA Streaks|Reverse", "Streak length", &fReverseStreakLengthScale,
+        DebugMenuAddVar("SA Streaks|Reverse", "Streak length", &s_ReverseStreakLengthScale,
                         nullptr, 0.05f, 0.25f, 2.50f);
-        DebugMenuAddVar("SA Streaks|Reverse", "Streak brightness", &fReverseStreakBrightness,
+        DebugMenuAddVar("SA Streaks|Reverse", "Streak brightness", &s_ReverseStreakBrightness,
                         nullptr, 0.05f, 0.0f, 1.50f);
-        DebugMenuAddVar("SA Streaks|Reverse", "Round core size", &fReverseCoreSizeScale,
+        DebugMenuAddVar("SA Streaks|Reverse", "Round core size", &s_ReverseCoreSizeScale,
                         nullptr, 0.05f, 0.40f, 1.60f);
-        DebugMenuAddVar("SA Streaks|Reverse", "Round core brightness", &fReverseCoreBrightness,
+        DebugMenuAddVar("SA Streaks|Reverse", "Round core brightness", &s_ReverseCoreBrightness,
                         nullptr, 0.05f, 0.0f, 1.0f);
-        DebugMenuAddVar("SA Streaks|Reverse", "Bike streak size", &fBikeReverseStreakSizeMult,
+        DebugMenuAddVar("SA Streaks|Reverse", "Bike streak size", &s_BikeReverseStreakSizeMultiplier,
                         nullptr, 0.05f, 0.10f, 1.00f);
-        DebugMenuAddVar("SA Streaks|Reverse", "Bike core size", &fBikeReverseCoreSizeMult,
+        DebugMenuAddVar("SA Streaks|Reverse", "Bike core size", &s_BikeReverseCoreSizeMultiplier,
                         nullptr, 0.05f, 0.10f, 1.00f);
-        DebugMenuAddVar("SA Streaks|Reverse", "Bike/quad brightness", &fBikeReverseBrightnessMult,
+        DebugMenuAddVar("SA Streaks|Reverse", "Bike/quad brightness", &s_BikeReverseBrightnessMultiplier,
                         nullptr, 0.05f, 0.0f, 1.0f);
-        DebugMenuAddVar("SA Streaks|Reverse", "Core angle start", &fReverseCoreAngleFadeStart,
+        DebugMenuAddVar("SA Streaks|Reverse", "Core angle start", &s_ReverseCoreAngleFadeStart,
                         nullptr, 0.01f, 0.50f, 0.95f);
-        DebugMenuAddVar("SA Streaks|Reverse", "Core angle end", &fReverseCoreAngleFadeEnd,
+        DebugMenuAddVar("SA Streaks|Reverse", "Core angle end", &s_ReverseCoreAngleFadeEnd,
                         nullptr, 0.005f, 0.96f, 1.00f);
 
-        DebugMenuAddVar("SA Streaks|Advanced", "Side angle exponent", &fSideAngleExponent,
+        DebugMenuAddVar("SA Streaks|Advanced", "Side angle exponent", &s_SideAngleExponent,
                         nullptr, 0.25f, 2.0f, 8.0f);
-        DebugMenuAddVar("SA Streaks|Advanced", "Streak distance start", &fStreakDistanceFadeStart,
+        DebugMenuAddVar("SA Streaks|Advanced", "Streak distance start", &s_StreakDistanceFadeStart,
                         nullptr, 1.0f, 5.0f, 38.0f);
-        DebugMenuAddVar("SA Streaks|Advanced", "Streak distance end", &fStreakDistanceFadeEnd,
+        DebugMenuAddVar("SA Streaks|Advanced", "Streak distance end", &s_StreakDistanceFadeEnd,
                         nullptr, 1.0f, 39.0f, 50.0f);
 
-        bDebugMenuRegistered = true;
+        s_DebugMenuRegistered = true;
     }
 
     struct Bootstrap
@@ -958,15 +1168,18 @@ namespace
         {
             // There are at most a few streak IDs per rendered vehicle. Reserve
             // ahead of time to avoid hash-table reallocation during render events.
-            StreakHistoryById.reserve(512);
+            s_StreakHistoryById.reserve(512);
             plugin::Events::initGameEvent += RegisterStreakDebugMenu;
             plugin::Events::vehicleRenderEvent += ProcessVehicleLights;
             plugin::Events::drawingEvent += RenderStreaks;
         }
-    } pluginBootstrap;
+    } s_PluginBootstrap;
 }
 
-BOOL APIENTRY DllMain(HMODULE, DWORD, LPVOID)
+BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
 {
+    if (reason == DLL_PROCESS_ATTACH)
+        s_PluginModuleHandle = module;
+
     return TRUE;
 }
